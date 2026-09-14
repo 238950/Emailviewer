@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR, ATTACH_DIR, ensureDirs } from './logger.js';
-import { safeJson, toJson, now, uid, isJunkAttachment, junkAttachmentReason } from './util.js';
+import { safeJson, toJson, now, uid, isJunkAttachment, junkAttachmentReason, mimeGroup as mimeGroupName, MIME_GROUP } from './util.js';
 
 ensureDirs();
 const DB_FILE = path.join(DATA_DIR, 'mailview.db');
@@ -400,6 +400,27 @@ export const MessageStore = {
     m.headers = safeJson(r.headers_json, {});
     return m;
   },
+  /**
+   * 批量按 id 取正文（BUG-43）。只选正文列，供启动回填等场景一次取回，
+   * 避免在循环里对每封邮件单独查库（N 次 SQL → 1 次）。
+   * @param {Array<number|string>} ids
+   * @returns {Map<number, {bodyText:string, bodyHtml:string}>}
+   */
+  bodiesByIds(ids) {
+    const out = new Map();
+    const list = (ids || []).filter((v) => v != null);
+    if (!list.length) return out;
+    // 分片查询，避开 SQLite 变量数上限（默认 999）
+    const CHUNK = 500;
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const part = list.slice(i, i + CHUNK);
+      const rows = q(
+        `SELECT id, body_text, body_html FROM message WHERE id IN (${part.map(() => '?').join(',')})`,
+        part);
+      for (const r of rows) out.set(r.id, { bodyText: r.body_text || '', bodyHtml: r.body_html || '' });
+    }
+    return out;
+  },
   /** 组合查询 */
   query(opts) {
     const where = [];
@@ -564,7 +585,7 @@ export const AttachmentStore = {
     const rows = q("SELECT DISTINCT stored FROM attachment WHERE stored != ''");
     return new Set(rows.map((r) => r.stored));
   },
-  /** 组合查询：过滤条件下推 SQL，列表 total 与分组统计口径一致（BUG-33） */
+  /** 组合查询：过滤/排序/分页全部下推 SQL，total 与分组统计口径一致（BUG-33） */
   list(opts) {
     const where = ['1=1']; const params = [];
     if (opts.accountIds && opts.accountIds.length) {
@@ -583,22 +604,37 @@ export const AttachmentStore = {
     if (wantJunk) where.push(`${JUNK_EXPR} = 1`);
     else if (noJunkByDefault) where.push(`${JUNK_EXPR} = 0`);
 
+    // 性能优化（BUG-42）：把「MIME 大类」过滤下推到 SQL。
+    // 以前是全表 JOIN 取回后在内存里按 a.group 过滤 + 排序 + 切片，
+    // 附件量大时（实测本机 300+ 条）要把所有行连同正文消息字段都读进 JS 再丢弃。
+    // 现在按分组定义翻译成 mime 的 IN/LIKE 条件，交给 SQLite 用索引过滤。
+    if (wantGroups.length) {
+      const pred = groupPredicate(wantGroups);
+      if (pred) { where.push(pred.sql); params.push(...pred.params); }
+    }
+
+    const sortKey = opts.sort === 'size' ? 'a.size' : (opts.sort === 'date' ? 'm.date_ms' : 'a.created_at');
+    const dir = opts.dir === 'asc' ? 'ASC' : 'DESC';
+    const limit = Math.min(Math.max(Number(opts.pageSize) || 60, 1), 200);
+    const offset = Math.max(Number(opts.page) || 0, 0) * limit;
+
+    const agg = q1(
+      `SELECT COUNT(*) AS total, COALESCE(SUM(a.size), 0) AS totalBytes
+       FROM attachment a JOIN message m ON m.id = a.message_id
+       WHERE ${where.join(' AND ')}`, params);
     const rows = q(
       `SELECT a.*, m.subject, m.from_name, m.from_addr, m.date_ms, m.read
        FROM attachment a JOIN message m ON m.id = a.message_id
-       WHERE ${where.join(' AND ')} ORDER BY a.created_at DESC, a.id DESC`, params);
-    let atts = rows.map(rowToAtt);
-    if (wantGroups.length) atts = atts.filter((a) => wantGroups.includes(a.group));
-
-    const total = atts.length;
-    const totalBytes = atts.reduce((n, a) => n + (a.size || 0), 0);
-    // 排序：默认按缓存时间倒序；可选按大小 / 邮件时间（dir 控制升降）
-    const dir = opts.dir === 'asc' ? 1 : -1;
-    const sortKey = opts.sort === 'size' ? 'size' : (opts.sort === 'date' ? 'dateMs' : 'createdAt');
-    atts.sort((a, b) => (dir * ((a[sortKey] || 0) - (b[sortKey] || 0))) || (b.id - a.id));
-    const limit = Math.min(Math.max(Number(opts.pageSize) || 60, 1), 200);
-    const offset = Math.max(Number(opts.page) || 0, 0) * limit;
-    return { total, totalBytes, list: atts.slice(offset, offset + limit), page: opts.page || 0, pageSize: limit };
+       WHERE ${where.join(' AND ')}
+       ORDER BY ${sortKey} ${dir}, a.id DESC
+       LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    return {
+      total: agg?.total || 0,
+      totalBytes: agg?.totalBytes || 0,
+      list: rows.map(rowToAtt),
+      page: opts.page || 0,
+      pageSize: limit,
+    };
   },
   /** 按 MIME 大类和“杂项”分组的统计（同样走 SQL，和 list 的 total 同口径） */
   stats(opts) {
@@ -629,31 +665,62 @@ export const AttachmentStore = {
   },
 };
 
-const MIME_GROUPS = {
-  document: ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.oasis.opendocument.text', 'application/rtf', 'text/rtf'],
-  table: ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.oasis.opendocument.spreadsheet', 'text/csv', 'text/tab-separated-values'],
-  slide: ['application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.oasis.opendocument.presentation'],
-  pdf: ['application/pdf'],
-  image: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/svg+xml', 'image/heic', 'image/tiff', 'image/avif'],
-  archive: ['application/zip', 'application/x-zip-compressed', 'application/x-rar-compressed', 'application/x-7z-compressed', 'application/gzip', 'application/x-tar', 'application/x-bzip2'],
-  calendar: ['text/calendar', 'text/x-vcalendar', 'application/ics'],
-  text: [],
-  other: [],
-};
+/* MIME 大类定义与判定统一来自 util.js（单一事实源），此处不再重复定义，
+   避免与附件库/过滤规则对同一附件给出不同分组名。 */
+const MIME_GROUPS = MIME_GROUP;
 
 function mimeList(g) { return MIME_GROUPS[g] || []; }
 
-export function mimeGroupName(mime) {
-  const m = String(mime || '').toLowerCase();
-  for (const [k, list] of Object.entries(MIME_GROUPS)) {
-    if (list.includes(m)) return k;
+/**
+ * 把「MIME 大类名」翻译成等价的 SQL 条件，使过滤能下推到 SQLite（BUG-42）。
+ * 语义必须与 mimeGroup() 完全一致，否则附件库筛选会漏项：
+ *   - 显式枚举的组（document/table/...）→ mime IN (...)
+ *   - 以前缀兜底的组（image/text/audio/video）→ mime LIKE 'prefix/%'
+ *   - text 组额外包含 JSON/XML/JS/PHP 等非 text/ 前缀类型
+ *   - other 组 = 上述都不匹配的剩余项（用 NOT 组合表达）
+ * @returns {{sql:string, params:Array}|null}
+ */
+function groupPredicate(groups) {
+  const clauses = []; const params = [];
+  /** 所有被显式枚举过的 MIME（小写）——other 组必须把它们全部排除，语义才与 mimeGroup() 一致 */
+  const allExplicit = [];
+  for (const list of Object.values(MIME_GROUPS)) for (const m of list) allExplicit.push(m.toLowerCase());
+
+  for (const g of groups) {
+    // 每个分组的若干「候选条件」之间是 OR（命中任一即属于该组），
+    // 分组之间也是 OR；整个分组用一层括号包住。
+    const alts = [];
+    const exact = mimeList(g);
+    if (exact.length) {
+      alts.push(`lower(a.mime) IN (${exact.map(() => '?').join(',')})`);
+      params.push(...exact.map((m) => m.toLowerCase()));
+    }
+
+    if (g === 'text') {
+      // text 组 = text/ 前缀 ∪ TEXT_LIKE（JSON/XML/JS/PHP）——两者必须 OR
+      alts.push("a.mime LIKE 'text/%'");
+      alts.push(`lower(a.mime) IN (${TEXT_LIKE_LOWER.map(() => '?').join(',')})`);
+      params.push(...TEXT_LIKE_LOWER);
+    } else if (g === 'image' || g === 'audio' || g === 'video') {
+      // 这些组：显式枚举 ∪ 前缀兜底 —— 同样 OR
+      alts.push(`a.mime LIKE '${g}/%'`);
+    } else if (g === 'other') {
+      // other = 排除所有已知前缀与所有显式枚举类型后的剩余项（整体作为一个条件）
+      const notPrefix = "(a.mime NOT LIKE 'text/%' AND a.mime NOT LIKE 'image/%' AND a.mime NOT LIKE 'audio/%' AND a.mime NOT LIKE 'video/%')";
+      alts.push(`${notPrefix} AND lower(a.mime) NOT IN (${allExplicit.map(() => '?').join(',')}) AND lower(a.mime) NOT IN (${TEXT_LIKE_LOWER.map(() => '?').join(',')})`);
+      params.push(...allExplicit, ...TEXT_LIKE_LOWER);
+    }
+
+    if (alts.length) clauses.push(`(${alts.join(' OR ')})`);
   }
-  if (m.startsWith('text/') || m === 'application/json' || m === 'application/xml' || m === 'application/javascript' || m === 'application/x-httpd-php') return 'text';
-  if (m.startsWith('image/')) return 'image';
-  if (m.startsWith('audio/')) return 'audio';
-  if (m.startsWith('video/')) return 'video';
-  return 'other';
+  return clauses.length ? { sql: `(${clauses.join(' OR ')})`, params } : null;
 }
+
+/** util.js 中 text 组除 text/ 前缀外的额外类型（小写，供 SQL 比较） */
+const TEXT_LIKE_LOWER = ['application/json', 'application/xml', 'application/javascript', 'application/x-httpd-php'];
+
+/** 兼容既有调用方（rules.js 等）：统一转发到 util.js 的实现 */
+export { mimeGroupName };
 
 function rowToAtt(r) {
   // junk_override 优先（用户手动改判），否则用落库的自动判定

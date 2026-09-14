@@ -22,9 +22,13 @@ export function pushNewMailNotice(account, newCount, { firstSync = false } = {})
   const s = getSettings();
   if (!s.newMailNotify) return null;
   if (!newCount || newCount <= 0) return null;
-  // 取最近几封（优先未读）作为通知预览
-  const rows = MessageStore.query({ accountIds: [account.id], unreadOnly: true, pageSize: 3 }).list;
-  const fallback = rows.length ? rows : MessageStore.query({ accountIds: [account.id], pageSize: 3 }).list;
+  // 通知预览只取该账户「收件箱」里的邮件（BUG-41）：
+  // 此前不带 folder 过滤，会把已归档/已移动/已删除的旧邮件也算进来，
+  // 导致预览条目与"刚收到"的语义不符（Outlook 桌面账户的收件箱还是 \账号\Inbox 这类路径）。
+  const inbox = resolveInboxFolders([account.id]);
+  const scope = inbox.folders.length ? { folderIn: inbox.folders } : {};
+  const rows = MessageStore.query({ accountIds: [account.id], ...scope, unreadOnly: true, pageSize: 3 }).list;
+  const fallback = rows.length ? rows : MessageStore.query({ accountIds: [account.id], ...scope, pageSize: 3 }).list;
   const items = fallback.slice(0, 3).map((m) => ({
     id: m.id, subject: m.subject, fromName: m.fromName || m.fromAddr, dateMs: m.dateMs,
   }));
@@ -289,6 +293,19 @@ export function startServices() {
   // 价值评分 + 日期回填：对历史邮件先按本地规则补全（AI 随后精修，避免首页首屏逐封实时计算）
   try {
     const rows = MessageStore.query({ bodyFetched: true, pageSize: 200 }).list;
+
+    // 性能优化（BUG-43）：先判定哪些邮件「真的需要读正文重算日期」，
+    // 再用一次查询把这些邮件的正文批量取回（原先在循环里对每封调 detail()，
+    // 200 封就是 200 次额外 SQL + 200 次对象构造，启动瞬间有可感知的同步 IO 尖峰）。
+    const needBody = [];
+    for (const m of rows) {
+      const stored = Array.isArray(m.dates) ? m.dates : [];
+      const hasAi = stored.some((d) => d.source === 'ai');
+      const needsRefresh = stored.length === 0 || (!hasAi && stored.some((d) => !d.confidence));
+      if (needsRefresh && !hasAi) needBody.push(m.id);
+    }
+    const bodies = needBody.length ? MessageStore.bodiesByIds(needBody) : new Map();
+
     let scored = 0; let dated = 0; let purged = 0;
     for (const m of rows) {
       const patch = {};
@@ -300,7 +317,10 @@ export function startServices() {
       const needsRefresh = stored.length === 0 || (!hasAi && stored.some((d) => !d.confidence));
       if (needsRefresh && !hasAi) {
         try {
-          const ds = extractFromMessage(MessageStore.detail(m.id) || m)
+          const body = bodies.get(m.id);
+          // 正文缺失时回退到不含正文的行（extractFromMessage 只用 subject/body），并顺带清掉旧噪声
+          const src = body ? { ...m, bodyText: body.bodyText, bodyHtml: body.bodyHtml } : m;
+          const ds = extractFromMessage(src)
             .map((c) => ({ ms: c.ms, title: String(c.context || '').slice(0, 24), kind: c.type, confidence: c.confidence, source: 'rule' }))
             .filter((c) => c.confidence === 'high')
             .slice(0, 6);

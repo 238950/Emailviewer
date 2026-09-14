@@ -56,24 +56,65 @@ export const prettyFolder = (name) => {
   return name;
 };
 
+/**
+ * MIME 大类定义 —— 全项目唯一来源（单一事实源）。
+ *
+ * 附件分组在三个地方被消费，历史上 util.js 与 store.js 各有一份定义且不一致
+ * （util 有 code 组、把 text/html 归入 code；store 无 code 组、把 html 归入 text），
+ * 导致「附件库按类型筛选」与「过滤规则的 attachment_group 匹配」对同一附件
+ * 可能得出不同分组名。现统一在此处定义，store.js 与 rules.js 均从此导入。
+ *
+ * 注意：text/html、text/css、application/json 等归入 text 组而非 code，
+ * 因为它们在邮件场景下基本都是正文/富文本残留，而非用户要下载的「代码文件」。
+ */
 export const MIME_GROUP = {
-  document: ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.oasis.opendocument.text', 'text/rtf', 'application/rtf'],
-  table: ['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'text/csv', 'application/vnd.oasis.opendocument.spreadsheet'],
-  slide: ['application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  document: [
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.oasis.opendocument.text',
+    'application/rtf', 'text/rtf',
+  ],
+  table: [
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.oasis.opendocument.spreadsheet',
+    'text/csv', 'text/tab-separated-values',
+  ],
+  slide: [
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/vnd.oasis.opendocument.presentation',
+  ],
   pdf: ['application/pdf'],
-  image: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/svg+xml', 'image/heic', 'image/tiff'],
-  archive: ['application/zip', 'application/x-zip-compressed', 'application/x-rar-compressed', 'application/x-7z-compressed', 'application/gzip', 'application/x-tar'],
-  calendar: ['text/calendar', 'application/ics', 'text/x-vcalendar'],
-  code: ['text/javascript', 'application/json', 'text/x-python', 'text/html', 'text/css', 'application/xml', 'text/xml', 'application/x-sh'],
-  other: []
+  image: [
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp',
+    'image/svg+xml', 'image/heic', 'image/tiff', 'image/avif',
+  ],
+  archive: [
+    'application/zip', 'application/x-zip-compressed', 'application/x-rar-compressed',
+    'application/x-7z-compressed', 'application/gzip', 'application/x-tar', 'application/x-bzip2',
+  ],
+  calendar: ['text/calendar', 'text/x-vcalendar', 'application/ics'],
+  text: [],
+  other: [],
 };
 
+/** 归入 text 组的非 text/ 前缀类型（JSON/XML/JS/PHP 等） */
+const TEXT_LIKE = new Set([
+  'application/json', 'application/xml', 'application/javascript', 'application/x-httpd-php',
+]);
+
+/**
+ * 由 MIME 类型得到附件大类名。全项目唯一实现。
+ * @param {string} mime
+ * @returns {string} document | table | slide | pdf | image | archive | calendar | text | audio | video | other
+ */
 export const mimeGroup = (mime) => {
   const m = String(mime || '').toLowerCase();
   for (const [k, list] of Object.entries(MIME_GROUP)) {
     if (list.includes(m)) return k;
   }
-  if (m.startsWith('text/')) return 'text';
+  if (m.startsWith('text/') || TEXT_LIKE.has(m)) return 'text';
   if (m.startsWith('image/')) return 'image';
   if (m.startsWith('audio/')) return 'audio';
   if (m.startsWith('video/')) return 'video';
