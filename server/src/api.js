@@ -101,6 +101,39 @@ const clampInt = (v, dflt, min, max) => {
   return Math.min(Math.max(Math.trunc(n), min), max);
 };
 
+/**
+ * BUG-44：async 路由包装器。
+ * Express 4 不会自动捕获 async 处理函数 reject 的 Promise——一旦抛错就变成
+ * unhandledRejection，Node 22 默认 --unhandled-rejections=throw 会直接终止进程。
+ * 用 wrap() 把 rejection 显式转交给 next()，交给下方统一错误中间件处理。
+ */
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/* ---------- AI 在途请求去重（BUG-46） ---------- */
+/**
+ * 手动触发的 AI 接口（classify / summarize / ai-classify）原先无锁：
+ * 连点、多标签页或网络重试会串行执行多次真实调用 → 重复计费。
+ * 这里按 `${kind}:${key}` 维护在途表，重复请求直接 429。
+ * 与 services.js 的 busy.classifying（后台批处理）互补，不共用同一把锁，
+ * 避免后台批处理运行时用户手动操作被误拒。
+ */
+const aiInFlight = new Map();
+
+/** 尝试占位；返回 true 表示获得执行权，false 表示已有同键请求在途 */
+export function claimAi(kind, key) {
+  const k = `${kind}:${key}`;
+  if (aiInFlight.has(k)) return false;
+  aiInFlight.set(k, Date.now());
+  return true;
+}
+export function releaseAi(kind, key) {
+  aiInFlight.delete(`${kind}:${key}`);
+}
+/** 在途表快照（供 /status 观测，也便于验证脚本断言） */
+export function aiInFlightSnapshot() {
+  return [...aiInFlight.entries()].map(([k, at]) => ({ key: k, since: at, ms: Date.now() - at }));
+}
+
 const MASK = '••••••••';
 
 /** 密钥脱敏：保留前 4 位与后 4 位，中间用 * 连接（如 sk-a****1234）；过短则统一 **** */
@@ -424,21 +457,33 @@ api.post('/messages/:id/label', (req, res) => {
   ok(res, { id, labels });
 });
 
-api.post('/messages/:id/classify', async (req, res) => {
+api.post('/messages/:id/classify', wrap(async (req, res) => {
   const m = MessageStore.detail(req.params.id);
   if (!m) return fail(res, '邮件不存在', 404);
-  // 手动分类时重置 ai_attempted 以便重跑
-  MessageStore.update(m.id, { ai_attempted: 0 });
-  const out = await aiClassifyBatch([MessageStore.detail(m.id)], { save: true });
-  ok(res, { result: out[0] || null });
-});
+  // BUG-46：同一封邮件已有在途分类请求时直接拒绝，避免重复调用上游 AI（重复计费）
+  if (!claimAi('classify', m.id)) return fail(res, '该邮件正在分类中，请稍候', 429);
+  try {
+    // 手动分类时重置 ai_attempted 以便重跑
+    MessageStore.update(m.id, { ai_attempted: 0 });
+    const out = await aiClassifyBatch([MessageStore.detail(m.id)], { save: true });
+    ok(res, { result: out[0] || null });
+  } finally {
+    releaseAi('classify', m.id);
+  }
+}));
 
-api.post('/messages/:id/summarize', async (req, res) => {
+api.post('/messages/:id/summarize', wrap(async (req, res) => {
   const m = MessageStore.detail(req.params.id);
   if (!m) return fail(res, '邮件不存在', 404);
-  const r = await summarizeMessage(m);
-  ok(res, { result: r });
-});
+  // BUG-46：摘要同样加在途去重
+  if (!claimAi('summarize', m.id)) return fail(res, '该邮件正在生成摘要，请稍候', 429);
+  try {
+    const r = await summarizeMessage(m);
+    ok(res, { result: r });
+  } finally {
+    releaseAi('summarize', m.id);
+  }
+}));
 
 /**
  * BUG-19：日期候选的可信度门槛。
@@ -657,7 +702,8 @@ api.get('/status', (req, res) => {
   const catUnread = {};
   for (const c of MessageStore.unreadByCategory()) catUnread[c.category] = c.unread;
   const upcoming = EventStore.upcoming(3);
-  ok(res, { accounts, catUnread, upcomingEvents: upcoming, serverTime: now() });
+  // BUG-46：暴露在途 AI 请求，便于前端提示与验证脚本断言
+  ok(res, { accounts, catUnread, upcomingEvents: upcoming, serverTime: now(), aiInFlight: aiInFlightSnapshot() });
 });
 
 /* ================= 附件 ================= */
@@ -729,19 +775,54 @@ api.post('/attachments/:id/save', (req, res) => {
   const src = path.join(ATTACH_DIR, path.basename(rel));
   if (!fs.existsSync(src)) return fail(res, '附件文件缺失', 404);
   const s = getSettings();
-  const dir = (req.body && req.body.dir) || s.attachmentSaveDir || SAVED_DIR;
+  const requested = (req.body && req.body.dir) || s.attachmentSaveDir || SAVED_DIR;
+
+  // BUG-45：保存目录必须落在白名单前缀内。
+  // 原先直接采用请求体里的 dir，safeLocalName() 只清洗文件名、对目录毫无约束，
+  // 任何同源页面都能借该接口把文件写到任意可写路径（实测曾成功写入 C:\Windows\Temp）。
+  // 修法：resolve 成绝对路径后再做前缀比较（必须先 resolve，否则 ../ 可绕过字符串比较）。
+  const allowed = saveDirWhitelist(s);
+  const resolvedDir = resolveSaveDir(requested, allowed);
+  if (!resolvedDir) {
+    logger.warn('api', `拒绝越界的附件保存目录：${requested}`);
+    return fail(res, '保存目录不在允许范围内（仅允许设置中的保存目录及其子目录）', 403);
+  }
+
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    const dest = path.join(dir, safeLocalName(att.filename || `attachment-${att.id}`));
+    fs.mkdirSync(resolvedDir, { recursive: true });
+    const dest = path.join(resolvedDir, safeLocalName(att.filename || `attachment-${att.id}`));
     fs.copyFileSync(src, dest);
+    // 仅在目录通过白名单校验后才打开资源管理器，避免"打开任意目录"被滥用
     if (s.autoOpenFolderAfterSave) {
-      try { execFile('explorer.exe', [dir]); } catch { /* 忽略 */ }
+      try { execFile('explorer.exe', [resolvedDir]); } catch { /* 忽略 */ }
     }
     ok(res, { savedTo: dest });
   } catch (e) {
     fail(res, `保存失败：${e.message}`, 500);
   }
 });
+
+/** BUG-45：附件保存的可写根目录白名单（去重 + 解析为绝对路径） */
+function saveDirWhitelist(s) {
+  const roots = [s.attachmentSaveDir, SAVED_DIR, ATTACH_DIR].filter(Boolean).map((d) => path.resolve(String(d)));
+  return [...new Set(roots)];
+}
+
+/**
+ * BUG-45：把候选目录解析为绝对路径并校验落在白名单内。
+ * 通过返回 resolve 后的绝对路径，不通过返回 null。
+ * 用 path.relative 判断包含关系（比字符串 startsWith 更可靠，能正确处理
+ * 大小写差异、路径分隔符差异，以及 "C:\data" vs "C:\database" 这类前缀误判）。
+ */
+function resolveSaveDir(candidate, allowedRoots) {
+  const abs = path.resolve(String(candidate));
+  for (const root of allowedRoots) {
+    const rel = path.relative(root, abs);
+    // rel 为空表示就是 root 本身；不以 .. 开头且非绝对路径表示是 root 的子目录
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return abs;
+  }
+  return null;
+}
 
 function safeLocalName(n) {
   return String(n || 'file').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 180) || 'file';
@@ -1076,19 +1157,25 @@ ${ctx || '（当前没有可用邮件）'}`;
     ok(res, { mode: 'error', error: e.message, sources });
   }
 });
-api.post('/ai/classify', async (req, res) => {
+api.post('/ai/classify', wrap(async (req, res) => {
   const accountId = req.body?.accountId;
-  const accounts = accountId ? [accountId] : AccountStore.list().filter((a) => a.enabled).map((a) => a.id);
-  let total = 0;
-  const details = [];
-  for (const aid of accounts) {
-    const need = MessageStore.uncategorized(aid, 30);
-    if (!need.length) continue;
-    const out = await aiClassifyBatch(need, { save: true });
-    total += out.length; details.push(...out);
+  // BUG-46：整批分类加全局在途锁——批处理耗时长，重复触发的代价最高
+  if (!claimAi('ai-classify', accountId || '*')) return fail(res, '批量分类正在进行中，请稍候', 429);
+  try {
+    const accounts = accountId ? [accountId] : AccountStore.list().filter((a) => a.enabled).map((a) => a.id);
+    let total = 0;
+    const details = [];
+    for (const aid of accounts) {
+      const need = MessageStore.uncategorized(aid, 30);
+      if (!need.length) continue;
+      const out = await aiClassifyBatch(need, { save: true });
+      total += out.length; details.push(...out);
+    }
+    ok(res, { classified: total, details: details.slice(0, 40) });
+  } finally {
+    releaseAi('ai-classify', accountId || '*');
   }
-  ok(res, { classified: total, details: details.slice(0, 40) });
-});
+}));
 api.get('/ai/status', (req, res) => {
   const p = activeProvider();
   const pending = {};
@@ -1294,7 +1381,8 @@ api.post('/storage/purge-cache', (req, res) => {
 });
 api.get('/logs', (req, res) => {
   try {
-    const n = num(req.query.tail, 120);
+    // BUG-47：改用 clampInt——原先的 num() 不夹取，tail=999999999 会把整个日志文件读进内存返回
+    const n = clampInt(req.query.tail, 120, 1, 2000);
     const content = fs.readFileSync(LOG_FILE, 'utf8').split('\n').slice(-n).join('\n');
     ok(res, { logs: content });
   } catch {
@@ -1308,4 +1396,17 @@ api.get('/system', (req, res) => {
 /* BUG-32：未知 /api 路由统一返回 JSON 404（而不是 Express 的 HTML "Cannot GET /api/xxx"） */
 api.use((req, res) => {
   fail(res, `接口不存在：${req.method} /api${req.path === '/' ? '' : req.path}`, 404);
+});
+
+/**
+ * BUG-44：统一错误中间件（必须四个参数，且必须放在所有路由与 404 兜底之后）。
+ * 作用是兜住 wrap() 转交过来的 async rejection，以及同步路由里被 next(err) 抛出的异常。
+ * 若没有它，这些错误会冒泡到 Express 默认处理器：开发环境返回 HTML 堆栈、生产环境静默 500，
+ * 且日志里看不到任何线索。这里统一：写日志（含堆栈与请求上下文）→ 返回结构化 JSON。
+ */
+api.use((err, req, res, next) => {
+  const detail = err?.stack || err?.message || String(err);
+  logger.error('api', `未捕获异常 ${req.method} /api${req.path}：${detail}`);
+  if (res.headersSent) return next(err);   // 响应已开始发送，只能交给 Express 收尾（否则二次写入会崩）
+  fail(res, `服务器内部错误：${err?.message || '未知错误'}`, 500);
 });

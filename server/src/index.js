@@ -54,8 +54,23 @@ server.listen(PORT, HOST, () => {
 server.on('error', (e) => {
   logger.error('main', `端口 ${PORT} 启动失败：${e.message}`);
   if (e.code === 'EADDRINUSE') {
-    console.error(`\n  ✗ 端口 ${PORT} 已被占用。可先关闭占用程序，或设置环境变量 PORT=其它端口再启动。\n`);
+    console.error(`\n  ✗ 端口 ${PORT} 已被占用。可先关闭占用程序，或设置环境变量 MAILVIEW_PORT=其它端口再启动。\n`);
   }
+  process.exit(1);
+});
+
+/**
+ * BUG-44：进程级兜底。
+ * 即便有统一错误中间件，仍可能有中间件之外的地方（定时器回调、事件监听、后台任务）
+ * 抛出未捕获异常。这两处钩子至少保证：① 日志里留下完整堆栈便于事后定位；
+ * ② uncaughtException 之后进程状态已不可信，记录后主动退出，交由启动脚本重启，
+ *    而不是带病运行（原先会由 Node 默认行为直接终止且不留日志）。
+ */
+process.on('unhandledRejection', (reason) => {
+  logger.error('main', `未处理的 Promise 拒绝：${reason?.stack || reason}`);
+});
+process.on('uncaughtException', (err) => {
+  logger.error('main', `未捕获异常（进程将退出）：${err?.stack || err}`);
   process.exit(1);
 });
 
