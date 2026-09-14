@@ -1,16 +1,39 @@
 // 前端 API 封装
 const BASE = '';
 
-async function req(method, path, body) {
+/**
+ * BUG-55：请求超时。
+ * 原先 fetch 完全不设超时——实测单次 classify 27.5s、并发时达 42s，
+ * 期间用户只能看着转圈、无法取消；切走再切回还会触发重复请求。
+ * 这里按端点区分预算：AI 类调用天然慢，给 120s；其余 30s。
+ */
+const TIMEOUT_DEFAULT = 30000;
+const TIMEOUT_AI = 120000;
+const AI_PATH_RE = /^\/api\/(ai\/chat|ai\/test|ai\/models|messages\/[^/]+\/(classify|summarize)|calendar\/auto-from-mail|accounts\/[^/]+\/sync)/;
+
+function timeoutFor(path, explicit) {
+  if (explicit) return explicit;
+  return AI_PATH_RE.test(path) ? TIMEOUT_AI : TIMEOUT_DEFAULT;
+}
+
+async function req(method, path, body, opts = {}) {
   let res;
+  const ms = timeoutFor(path, opts.timeout);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
   try {
     res = await fetch(BASE + path, {
       method,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
     });
   } catch (e) {
+    // 区分"超时"与"服务没起来"，前者可重试、后者要用户去启动服务
+    if (e.name === 'AbortError') throw new Error(`请求超时（超过 ${Math.round(ms / 1000)} 秒无响应），请稍后重试`);
     throw new Error('无法连接本地服务，请确认服务已启动');
+  } finally {
+    clearTimeout(timer);
   }
   let json = null;
   try { json = await res.json(); } catch { /* */ }

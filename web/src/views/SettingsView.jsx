@@ -1,9 +1,9 @@
 // 设置页：账户 / 同步 / AI / 规则 / 汇总提醒 / 存储 / 外观 / 日志
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { User, RefreshCw, Sparkles, Filter, CalendarClock, Database, Palette, ShieldCheck, Plus, Trash2, Pencil, CheckCircle2, XCircle, Loader2, Terminal, Star, FileText, Rocket, Power } from 'lucide-react';
 import { useStore, M, applyTheme } from '../store.js';
 import { api, fmtBytes } from '../api.js';
-import { Spinner, Modal, Field, Toggle, IconBtn } from '../components/common.jsx';
+import { Spinner, Modal, Field, Toggle, IconBtn, ConfirmDialog } from '../components/common.jsx';
 import { prettyFolder } from '../components/pretty.js';
 
 const MASK = '••••••••';
@@ -16,15 +16,35 @@ export default function SettingsView() {
 
   useEffect(() => { setSettingsLocal(settings); }, [settings]);
 
+  // BUG-56：设置保存串行化。
+  // 原先每次 save() 都并发发一个 PUT，busy 只用于禁用按钮、不阻止并发。
+  // 快速连调多个开关时，最终落库的值取决于响应到达顺序——可能不是用户最后操作的那个。
+  // 这里用 ref 记录"是否有保存在途"，在途时把最新 patch 攒起来，完成后合并再发一次，
+  // 既保证顺序（最后一次操作一定最后落库），又不丢中间改动。
+  const savingRef = useRef(false);
+  const pendingRef = useRef(null);
   const save = async (patch, msg = '设置已保存') => {
+    if (savingRef.current) {
+      pendingRef.current = { ...(pendingRef.current || {}), ...patch };
+      return;
+    }
+    savingRef.current = true;
     setBusy('save');
     try {
-      const r = await api.put('/api/settings', patch);
-      setSettingsLocal(r.settings);
+      let cur = patch;
+      // 循环：把在途期间攒下的 patch 合并后再发，直到没有新的为止
+      for (;;) {
+        // eslint-disable-next-line no-await-in-loop
+        const r = await api.put('/api/settings', cur);
+        setSettingsLocal(r.settings);
+        if (patch.syncIntervalMin != null || patch.initialSyncDays != null) { /* 服务端已生效 */ }
+        if (!pendingRef.current) break;
+        cur = pendingRef.current;
+        pendingRef.current = null;
+      }
       toast(msg, 'success');
-      if (patch.syncIntervalMin != null || patch.initialSyncDays != null) { /* 服务端已生效 */ }
     } catch (e) { toast(e.message, 'error'); }
-    finally { setBusy(''); }
+    finally { savingRef.current = false; pendingRef.current = null; setBusy(''); }
   };
 
   if (!settingsLocal) return <div className="view-page"><Spinner /></div>;
@@ -70,6 +90,7 @@ export default function SettingsView() {
 /* ---------- 账户 ---------- */
 function AccountsTab({ accounts, refreshStatus, toast, setNewAccountOpen }) {
   const [editing, setEditing] = useState(null);
+  const [ask, setAsk] = useState(null);   // BUG-58：主题化确认弹窗
   const { selectAccount, setView } = useStore();
   const setPrimary = async (id) => {
     try { await api.post(`/api/accounts/${id}/primary`); await refreshStatus(true); toast('已设为主账户', 'success'); } catch (e) { toast(e.message, 'error'); }
@@ -78,14 +99,23 @@ function AccountsTab({ accounts, refreshStatus, toast, setNewAccountOpen }) {
     try { await api.post(`/api/accounts/${id}/sync`); toast('同步完成', 'success'); } catch (e) { toast(e.message, 'error'); }
     refreshStatus(true);
   };
-  const del = async (a) => {
-    if (!window.confirm(`确定删除账户「${a.name}」？\n将一并删除：本地已同步的邮件、附件缓存文件，以及由该账户邮件生成的日历事件。\n（不会影响邮箱服务器上的真实邮件）`)) return;
-    try {
-      const r = await api.del(`/api/accounts/${a.id}`);
-      const extra = r.report ? `（邮件 ${r.report.messages} 封、附件文件 ${r.report.files} 个、日历事件 ${r.report.events} 条，释放约 ${(r.report.bytesFreed / 1048576).toFixed(1)} MB）` : '';
-      toast(`账户已删除${extra}`, 'success');
-      refreshStatus(true);
-    } catch (e) { toast(e.message, 'error'); }
+  // BUG-58：改为主题化确认弹窗（原生 confirm 在暗色下刺眼，且被浏览器抑制时会静默返回 false）
+  const del = (a) => {
+    setAsk({
+      title: '删除账户',
+      danger: true,
+      confirmText: '永久删除本地数据',
+      cancelText: '保留',
+      body: `确定删除账户「${a.name}」？\n将一并删除：本地已同步的邮件、附件缓存文件，以及由该账户邮件生成的日历事件。\n（不会影响邮箱服务器上的真实邮件）`,
+      onOk: async () => {
+        try {
+          const r = await api.del(`/api/accounts/${a.id}`);
+          const extra = r.report ? `（邮件 ${r.report.messages} 封、附件文件 ${r.report.files} 个、日历事件 ${r.report.events} 条，释放约 ${(r.report.bytesFreed / 1048576).toFixed(1)} MB）` : '';
+          toast(`账户已删除${extra}`, 'success');
+          refreshStatus(true);
+        } catch (e) { toast(e.message, 'error'); }
+      },
+    });
   };
   return (
     <div className="set-section">
@@ -122,6 +152,7 @@ function AccountsTab({ accounts, refreshStatus, toast, setNewAccountOpen }) {
         {!accounts.length && <div className="dim">还没有账户。点击「添加账户」选择<b>本机 Outlook 桌面</b>（读取 Outlook 已同步邮件，无需密码）或 IMAP 直接连接。</div>}
       </div>
       {editing && <AccountEdit account={editing} onClose={() => setEditing(null)} toast={toast} refreshStatus={refreshStatus} />}
+      <ConfirmDialog req={ask} onClose={() => setAsk(null)} />
     </div>
   );
 }
@@ -201,6 +232,7 @@ function AiTab({ toast }) {
   const [cfg, setCfg] = useState(null);
   const [testing, setTesting] = useState('');
   const [saving, setSaving] = useState(false);
+  const [ask, setAsk] = useState(null);     // BUG-58：主题化确认弹窗
   const [typedKeys, setTypedKeys] = useState({});
   const [models, setModels] = useState({});            // providerKey -> [模型名]
   const [loadingModels, setLoadingModels] = useState({});
@@ -272,28 +304,41 @@ function AiTab({ toast }) {
   };
 
   /** 删除某个 AI 服务商模块（传 null 给服务端表示删除） */
-  const removeProvider = async (k) => {
+  const removeProvider = (k) => {                 // BUG-58：主题化确认弹窗
     const label = cfg?.providers?.[k]?.label || k;
-    if (!window.confirm(`删除服务商「${label}」？已保存的该服务商 Key 也会一并移除。`)) return;
-    const left = { ...(cfg.providers || {}) };
-    delete left[k];
-    const newActive = cfg.active === k ? (Object.keys(left)[0] || '') : cfg.active;
-    setCfg((c) => ({ ...c, active: newActive }));
-    try {
-      const r = await api.put('/api/ai/config', { providers: { [k]: null }, active: newActive || undefined });
-      setCfg(r.ai);
-      toast(`已删除服务商「${label}」`, 'success');
-    } catch (e) { toast(e.message, 'error'); load(); }
+    setAsk({
+      title: '删除服务商',
+      danger: true,
+      confirmText: '删除',
+      body: `删除服务商「${label}」？已保存的该服务商 Key 也会一并移除。`,
+      onOk: async () => {
+        const left = { ...(cfg.providers || {}) };
+        delete left[k];
+        const newActive = cfg.active === k ? (Object.keys(left)[0] || '') : cfg.active;
+        setCfg((c) => ({ ...c, active: newActive }));
+        try {
+          const r = await api.put('/api/ai/config', { providers: { [k]: null }, active: newActive || undefined });
+          setCfg(r.ai);
+          toast(`已删除服务商「${label}」`, 'success');
+        } catch (e) { toast(e.message, 'error'); load(); }
+      },
+    });
   };
 
   /** 恢复内置服务商列表（保留已填写 Key） */
-  const resetProviders = async () => {
-    if (!window.confirm('恢复内置服务商列表？（已填写的 Key 会保留）')) return;
-    try {
-      const r = await api.put('/api/ai/config', { resetProviders: true });
-      setCfg(r.ai);
-      toast('已恢复内置服务商列表', 'success');
-    } catch (e) { toast(e.message, 'error'); }
+  const resetProviders = () => {                  // BUG-58：主题化确认弹窗
+    setAsk({
+      title: '恢复内置服务商列表',
+      confirmText: '恢复',
+      body: '恢复内置服务商列表？（已填写的 Key 会保留）',
+      onOk: async () => {
+        try {
+          const r = await api.put('/api/ai/config', { resetProviders: true });
+          setCfg(r.ai);
+          toast('已恢复内置服务商列表', 'success');
+        } catch (e) { toast(e.message, 'error'); }
+      },
+    });
   };
 
   if (!cfg) return <div className="set-section"><Spinner /></div>;
@@ -412,6 +457,7 @@ function AiTab({ toast }) {
           </div>
         </Modal>
       )}
+      <ConfirmDialog req={ask} onClose={() => setAsk(null)} />
     </div>
   );
 }
@@ -430,14 +476,22 @@ function RulesTab({ toast, accounts, categories }) {
   const [rules, setRules] = useState(null);
   const [editing, setEditing] = useState(null); // null | {} 新增 | rule
   const [applying, setApplying] = useState(false);
+  const [ask, setAsk] = useState(null);         // BUG-58：主题化确认弹窗
   const load = () => api.get('/api/rules').then((r) => setRules(r.rules)).catch((e) => toast(e.message, 'error'));
   useEffect(() => { load(); }, []);
   const toggleRule = async (r) => {
     try { await api.put(`/api/rules/${r.id}`, { enabled: !r.enabled }); toast(r.enabled ? '已停用' : '已启用', 'success'); load(); } catch (e) { toast(e.message, 'error'); }
   };
-  const del = async (id) => {
-    if (!window.confirm('删除这条规则？')) return;
-    try { await api.del(`/api/rules/${id}`); load(); } catch (e) { toast(e.message, 'error'); }
+  const del = (id) => {                          // BUG-58：主题化确认弹窗
+    setAsk({
+      title: '删除过滤规则',
+      danger: true,
+      confirmText: '删除',
+      body: '删除这条规则？（已应用到此前的标签/分类不会被撤销）',
+      onOk: async () => {
+        try { await api.del(`/api/rules/${id}`); load(); } catch (e) { toast(e.message, 'error'); }
+      },
+    });
   };
   const apply = async () => {
     setApplying(true);
@@ -472,6 +526,7 @@ function RulesTab({ toast, accounts, categories }) {
       ))}
       {!rules.length && <div className="dim">还没有规则。点击右上「新建规则」体验自动分类/打标签。</div>}
       {editing !== null && <RuleEdit rule={editing} accounts={accounts} categories={categories} onClose={() => setEditing(null)} onSaved={() => { load(); setEditing(null); }} toast={toast} />}
+      <ConfirmDialog req={ask} onClose={() => setAsk(null)} />
     </div>
   );
 }
@@ -632,6 +687,7 @@ function DigestTab({ s, save, busy, toast, categories }) {
 function StorageTab({ s, save, busy, toast }) {
   const [st, setSt] = useState(null);
   const [dir, setDir] = useState(s.attachmentSaveDir || '');
+  const [ask, setAsk] = useState(null);        // BUG-58：主题化确认弹窗
   const load = () => api.get('/api/storage').then(setSt).catch(() => {});
   useEffect(() => { load(); }, []);
   const testDir = async () => {
@@ -640,13 +696,20 @@ function StorageTab({ s, save, busy, toast }) {
       if (r.writable) { toast('目录可写 ✓', 'success'); save({ attachmentSaveDir: dir }, '默认保存目录已更新'); load(); }
     } catch (e) { toast(e.message, 'error'); }
   };
-  const cleanup = async () => {
-    if (!window.confirm('将删除全部本地缓存的附件文件（邮件正文不受影响）。之后打开相关邮件会自动重新抓取附件。继续？')) return;
-    try {
-      const r = await api.post('/api/storage/purge-cache');
-      toast(`已清空缓存（删除 ${r.removed} 个文件）`, 'success');
-      load();
-    } catch (e) { toast(e.message, 'error'); }
+  const cleanup = () => {                       // BUG-58：主题化确认弹窗
+    setAsk({
+      title: '清理附件缓存',
+      danger: true,
+      confirmText: '清空缓存',
+      body: '将删除全部本地缓存的附件文件（邮件正文不受影响）。之后打开相关邮件会自动重新抓取附件。继续？',
+      onOk: async () => {
+        try {
+          const r = await api.post('/api/storage/purge-cache');
+          toast(`已清空缓存（删除 ${r.removed} 个文件）`, 'success');
+          load();
+        } catch (e) { toast(e.message, 'error'); }
+      },
+    });
   };
   if (!st) return <div className="set-section"><Spinner /></div>;
   const pct = st.capBytes ? Math.min(100, (st.used / st.capBytes) * 100) : 0;
@@ -672,6 +735,7 @@ function StorageTab({ s, save, busy, toast }) {
       <div className="modal-actions">
         <button className="btn ghost danger" onClick={cleanup}>立即清理超额缓存</button>
       </div>
+      <ConfirmDialog req={ask} onClose={() => setAsk(null)} />
     </div>
   );
 }

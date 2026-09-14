@@ -17,6 +17,17 @@ export default function CalendarView() {
   const [sel, setSel] = useState(null); // 选中事件查看
   const [autoBusy, setAutoBusy] = useState(false);
 
+  // BUG-54：range 的 useMemo 必须声明在 autoFromMail 之前。
+  // 原先 autoFromMail（其函数体在第 25 行引用 range）定义在 range 之前——
+  // 虽然事件触发时 range 已初始化、不会真的报错，但这属于 TDZ 易碎写法：
+  // 若将来有人在渲染期间调用它（或在 effect 里提前引用），会直接崩溃。
+  // 把声明顺序理顺，消除隐患。
+  const range = useMemo(() => {
+    const start = new Date(ym.y, ym.m, 1);
+    const end = new Date(ym.y, ym.m + 1, 1);
+    return { start: start.getTime(), end: end.getTime() };
+  }, [ym]);
+
   /** 让 AI/规则识别出的邮件时间一键进日历（自动去重） */
   const autoFromMail = async () => {
     setAutoBusy(true);
@@ -30,12 +41,6 @@ export default function CalendarView() {
         : `没有新的时间可安排${r.skipped ? `（${r.skipped} 个已存在）` : '（请先让 AI 分类或打开邮件抓取正文）'}`, r.created ? 'success' : 'info');
     } catch (e) { toast(e.message, 'error'); } finally { setAutoBusy(false); }
   };
-
-  const range = useMemo(() => {
-    const start = new Date(ym.y, ym.m, 1);
-    const end = new Date(ym.y, ym.m + 1, 1);
-    return { start: start.getTime(), end: end.getTime() };
-  }, [ym]);
 
   useEffect(() => {
     setLoading(true);

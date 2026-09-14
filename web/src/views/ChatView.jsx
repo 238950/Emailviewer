@@ -14,8 +14,28 @@ const PRESETS = [
 ];
 
 const loadHistory = () => {
-  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch { return []; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    return Array.isArray(raw) ? raw.filter((m) => m && typeof m.content === 'string') : [];
+  } catch { return []; }
 };
+
+/**
+ * P2-3：写本地聊天记录时做配额保护。
+ * localStorage 配额极小（通常 5MB），QuotaExceededError 会直接抛出，
+ * 且部分浏览器在隐私模式下 setItem 本身就抛异常。
+ * 策略：写失败 → 逐级减半重试 → 仍失败则静默放弃（聊天记录只是便利缓存，不该影响主流程）。
+ */
+function saveHistory(msgs) {
+  const tries = [40, 20, 10, 4, 0];
+  for (const n of tries) {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(n ? msgs.slice(-n) : []));
+      return true;
+    } catch { /* 配额不足或不可用，继续降级 */ }
+  }
+  return false;
+}
 
 export default function ChatView() {
   const { messageId, messageDraft, accounts, selectMessage, setView, toast, categories, chatSeed } = useStore();
@@ -27,8 +47,14 @@ export default function ChatView() {
   const [mode, setMode] = useState('ai');           // 最近一次回复的模式
   const [engine, setEngine] = useState('');
   const listRef = useRef(null);
+  const quotaWarnedRef = useRef(false);
 
-  useEffect(() => { localStorage.setItem(HISTORY_KEY, JSON.stringify(msgs.slice(-40))); }, [msgs]);
+  useEffect(() => {
+    if (!saveHistory(msgs) && !quotaWarnedRef.current) {
+      quotaWarnedRef.current = true;
+      toast('本地聊天记录空间不足，本次会话不会持久保存（不影响功能）', 'error');
+    }
+  }, [msgs]);
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [msgs, sending]);

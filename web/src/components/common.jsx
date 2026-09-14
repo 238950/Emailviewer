@@ -114,6 +114,39 @@ export function useModalState() {
   return { open, setOpen };
 }
 
+/**
+ * BUG-58：主题化的确认弹窗，替代 window.confirm。
+ * 原生 confirm 在暗色模式下刺眼、按钮文案无法定制（改不成"永久删除/保留"），
+ * 且部分浏览器"禁止再弹窗"后会静默返回 false，用户误以为操作已生效。
+ * 用法：
+ *   const [ask, setAsk] = useState(null);   // { title, body, danger, confirmText, onOk }
+ *   ...
+ *   <ConfirmDialog req={ask} onClose={() => setAsk(null)} />
+ */
+export function ConfirmDialog({ req, onClose }) {
+  if (!req) return null;
+  const { title = '请确认', body, danger, confirmText = '确定', cancelText = '取消', onOk } = req;
+  return (
+    <Modal
+      title={title}
+      onClose={onClose}
+      footer={(
+        <div className="modal-actions">
+          <button className="btn ghost" onClick={onClose}>{cancelText}</button>
+          <button
+            className={`btn ${danger ? 'danger' : 'primary'}`}
+            onClick={async () => { await onOk?.(); onClose(); }}
+          >
+            {confirmText}
+          </button>
+        </div>
+      )}
+    >
+      <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.65 }}>{body}</div>
+    </Modal>
+  );
+}
+
 export function Field({ label, children, hint }) {
   return (
     <label className="field">

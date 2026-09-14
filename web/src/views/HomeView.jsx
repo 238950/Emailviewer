@@ -1,5 +1,5 @@
 // 首页：推荐活动 / 重要邮件 / 临近截止 / 未读速览 / 低相关邮件（AI worth 驱动，每封邮件只归属一列）
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Sparkles, RefreshCw, Star, CalendarClock, Mail, Trophy, AlertTriangle, Paperclip, Archive, CheckCircle2, RotateCcw, X } from 'lucide-react';
 import { useStore, M } from '../store.js';
 import { api, fmtDate, dayLabel } from '../api.js';
@@ -16,12 +16,31 @@ export default function HomeView() {
   const [doneOpen, setDoneOpen] = useState(false);
   const [doneData, setDoneData] = useState(null);
 
+  // BUG-57：listKey 在「任何」列表动作后都会递增（标记已读/星标/标签/已处理/同步…），
+  // 原先每次变化都立即重取 /home，且 accountId 未变时等同重复请求同一份数据。
+  // 这里统一走去抖 + 并发去重：300ms 内的多次触发只发一次，
+  // 已在途时不再叠加（用 inFlight ref），避免用户连点卡片打出一串请求。
+  const debounceRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const pendingRef = useRef(false);
+
   const load = () => {
+    if (inFlightRef.current) { pendingRef.current = true; return; }
+    inFlightRef.current = true;
     const qs = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
     api.get(`/api/home${qs}`)
       .then((r) => setData(r))
       .catch(() => setData(null))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        inFlightRef.current = false;
+        setLoading(false);
+        // 在途期间又有触发 → 补一次，保证最终状态是最新的
+        if (pendingRef.current) { pendingRef.current = false; load(); }
+      });
+  };
+  const loadDebounced = () => {
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(load, 300);
   };
   const loadDone = () => {
     const qs = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
@@ -34,10 +53,12 @@ export default function HomeView() {
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
-  // 同步完成 / 标记已处理等动作后自动刷新
+  // 同步完成（lastSyncAt 变化）→ 立即刷新；列表动作（listKey）→ 去抖刷新
   const syncSig = (status?.accounts || []).map((a) => a.lastSyncAt).join(',');
   useEffect(() => { if (syncSig) load(); /* eslint-disable-next-line */ }, [syncSig]);
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [listKey]);
+  useEffect(() => { loadDebounced(); /* eslint-disable-next-line */ }, [listKey]);
+  // 卸载时清掉待触发的去抖定时器，避免对已卸载组件 setState
+  useEffect(() => () => clearTimeout(debounceRef.current), []);
 
   const open = (item) => useStore.getState().openMessage(item);
   const markDone = async (item, done) => {

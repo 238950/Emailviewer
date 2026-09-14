@@ -134,6 +134,50 @@ export function aiInFlightSnapshot() {
   return [...aiInFlight.entries()].map(([k, at]) => ({ key: k, since: at, ms: Date.now() - at }));
 }
 
+/* ---------- 日期提取缓存（BUG-49） ---------- */
+/**
+ * extractFromMessage() 是纯正则扫描，实测 60 封约 404ms，而 /home 每次请求都会
+ * 对"尚未预存 dates 的邮件"重跑一遍（liveExtractBudget=60），且结果不缓存——
+ * 首页每 60 秒轮询、外加 listKey 变化（标记已读/星标/标签/已处理）都会重算，
+ * 造成用户点一下就有可感知卡顿。
+ *
+ * 缓存键用 `${id}|${dateMs}|${bodyLen}`：
+ * - id 区分邮件；
+ * - dateMs 变化说明邮件被重新抓取/替换；
+ * - bodyLen 是正文长度的廉价指纹——提取结果只依赖主题与正文，
+ *   长度相同而内容不同属于极小概率，且最坏后果只是日期候选短暂不准，
+ *   下次正文变化即自动失效（不值得为此读全文算哈希）。
+ * 容量上限 2000 条，超出按插入顺序淘汰最早的一批（Map 保持插入序）。
+ */
+const DATE_CACHE = new Map();
+const DATE_CACHE_MAX = 2000;
+
+function extractDatesCached(m, bodyMap) {
+  const key = `${m.id}|${m.dateMs || 0}|${m.bodyLen || 0}`;
+  const hit = DATE_CACHE.get(key);
+  if (hit) return hit;
+
+  // 正文优先从批量结果取（避免循环里单条 detail）；批量没命中再回退单条查
+  let src = m;
+  if (m.bodyLen == null) {
+    const b = bodyMap && bodyMap.get(m.id);
+    src = b ? { ...m, bodyText: b.bodyText, bodyHtml: b.bodyHtml } : (MessageStore.detail(m.id) || m);
+  }
+  let list = [];
+  try {
+    list = extractFromMessage(src).map((c) => ({ ms: c.ms, title: c.context, kind: c.type, confidence: c.confidence, source: 'rule' }));
+  } catch { list = []; }
+
+  if (DATE_CACHE.size >= DATE_CACHE_MAX) {
+    // 淘汰最早插入的 25%，避免每次满了都做一次 O(n) 清理
+    const drop = Math.ceil(DATE_CACHE_MAX / 4);
+    let i = 0;
+    for (const k of DATE_CACHE.keys()) { DATE_CACHE.delete(k); if (++i >= drop) break; }
+  }
+  DATE_CACHE.set(key, list);
+  return list;
+}
+
 const MASK = '••••••••';
 
 /** 密钥脱敏：保留前 4 位与后 4 位，中间用 * 连接（如 sk-a****1234）；过短则统一 **** */
@@ -600,15 +644,32 @@ api.get('/home', (req, res) => {
 
   const nowMs = Date.now();
   const horizon = nowMs + 21 * 86400 * 1000;
-  /** 取该邮件未来的时间点（优先使用已存的 AI/规则识别结果） */
+
+  // BUG-49：先挑出"没有预存 dates"的邮件，一次性批量取回正文，供缓存提取使用。
+  // 原先是在循环里对每封调用 MessageStore.detail()（60 次单条查询），现在改为 1 次批量。
+  const needBodyIds = [];
+  for (const m of all) {
+    if (!Array.isArray(m.dates) || !m.dates.length) needBodyIds.push(m.id);
+  }
+  let bodyMap = null;
+  if (needBodyIds.length) {
+    try { bodyMap = MessageStore.bodiesByIds(needBodyIds); } catch { bodyMap = null; }
+  }
+  // 给这批邮件打上正文字段，让 extractDatesCached 直接命中批量结果
+  if (bodyMap && bodyMap.size) {
+    for (const m of all) {
+      const b = bodyMap.get(m.id);
+      if (b) { m.bodyLen = (b.bodyText || b.bodyHtml || '').length; m.bodyText = b.bodyText; m.bodyHtml = b.bodyHtml; }
+    }
+  }
+
+  /** 取该邮件未来的时间点（优先使用已存的 AI/规则识别结果，其次走缓存的正则提取） */
   let liveExtractBudget = 60; // 首屏最多对 60 封做实时规则兜底，避免页面卡顿
   const futureDates = (m) => {
     let list = Array.isArray(m.dates) ? m.dates : [];
     if (!list.length && liveExtractBudget > 0) {
       liveExtractBudget--;
-      try {
-        list = extractFromMessage(MessageStore.detail(m.id) || m).map((c) => ({ ms: c.ms, title: c.context, kind: c.type, confidence: c.confidence, source: 'rule' }));
-      } catch { list = []; }
+      list = extractDatesCached(m, bodyMap);
     }
     return list.filter((d) => d && d.ms > nowMs - 3600 * 1000 && d.ms < horizon).sort((a, b) => a.ms - b.ms);
   };
@@ -690,13 +751,23 @@ api.post('/messages/:id/done', (req, res) => {
 
 /* ================= 状态（轮询） ================= */
 api.get('/status', (req, res) => {
+  // BUG-50：原先在「每个文件夹」的循环里重复调用 unreadByFolder(a.id)，
+  // 且在每个账户里重复调用 unreadByAccount()——N 个文件夹 = N 次相同的聚合查询。
+  // /status 每 10 秒被轮询，账户/文件夹增长后是 O(账户 × 文件夹) 的重复开销。
+  // 现改为：每次聚合只取一次，转成 Map 后按名查找。
+  const unreadByAcct = new Map(
+    MessageStore.unreadByAccount().map((r) => [r.account_id, r.unread || 0]),
+  );
   const accounts = AccountStore.list().map((a) => {
+    const perFolder = new Map(
+      MessageStore.unreadByFolder(a.id).map((r) => [r.folder, r.unread || 0]),
+    );
     const folders = FolderStore.list(a.id).map((f) => {
-      const un = MessageStore.unreadByFolder(a.id).find((r) => r.folder === f.name)?.unread || 0;
+      const un = perFolder.get(f.name) || 0;
       FolderStore.setUnreadLocal(a.id, f.name, un);
       return { name: f.name, unread: un, total: f.total };
     });
-    const unreadTotal = MessageStore.unreadByAccount().find((r) => r.account_id === a.id)?.unread || 0;
+    const unreadTotal = unreadByAcct.get(a.id) || 0;
     return { ...sanitizeAccount(a), folders, unreadTotal, syncing: busy.syncing.has(a.id) };
   });
   const catUnread = {};
@@ -911,9 +982,9 @@ api.post('/calendar/auto-from-mail', (req, res) => {
     if (!((m.worth || 0) >= 2 || !m.read)) continue;
     let list = Array.isArray(m.dates) ? m.dates : [];
     if (!list.length) {
-      try {
-        list = extractFromMessage(MessageStore.detail(m.id) || m).map((c) => ({ ms: c.ms, title: c.context, kind: c.type, confidence: c.confidence, source: 'rule' }));
-      } catch { list = []; }
+      // BUG-49 续：复用日期提取缓存。这里一次可扫 500 封，原先逐封 detail()+正则
+      // 是无缓存的重活；走缓存后与 /home 共享结果，二次触发近乎零成本。
+      list = extractDatesCached(m, null);
     }
     const picked = list
       .filter((d) => d && d.ms && d.ms > nowMs - 3600000 && d.ms <= horizon)

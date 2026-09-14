@@ -23,6 +23,7 @@ export default function ReaderPane({ onBack }) {
   const [busy, setBusy] = useState('');
   const [addingEvent, setAddingEvent] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [labelOpen, setLabelOpen] = useState(false);
   const [menu, setMenu] = useState(null);
   const bodyRef = useRef(null);
 
@@ -86,7 +87,11 @@ export default function ReaderPane({ onBack }) {
       USE_PROFILES: { html: true },
       ADD_ATTR: ['data-remote'],
     });
-  }, [detail, attachments, showRemote]);
+    // BUG-53：依赖中不含 showRemote。函数体从未读取它——远程图片的填充由下方
+    // 独立 effect 在 showRemote 变化时直接操作 DOM 完成。把 showRemote 放进依赖
+    // 会让每次"加载远程图片"都白白重跑一遍 DOMPurify 净化，并因 DOM 被重建
+    // 导致图片"先闪一下再出现"。useMemo 依赖应精确反映函数体实际使用的值。
+  }, [detail, attachments]);
 
   // 内嵌图片（有 contentId 且 inline）已渲染在正文里，不在附件区重复展示（BUG-04 附带问题）
   const visibleAtts = useMemo(
@@ -315,7 +320,11 @@ export default function ReaderPane({ onBack }) {
               <b>正文获取失败：</b>{fetchError}
               <div className="dim">可能是网络或邮箱服务器暂时不可用。</div>
             </div>
-            <button className="mini-btn" onClick={() => { const id = messageId; store.selectMessage(null); setTimeout(() => store.selectMessage(id), 50); }}><RotateCcw size={12} /> 重试</button>
+            {/* BUG-52：原先用 setTimeout(50) 先清空再重设 messageId 来"强制重取"，
+                这是魔法数字竞态（时序一变就点了没反应），且 timer 无清理——
+                用户快速切走邮件后它仍会执行，把旧邮件强行弹回来。
+                selectMessage 内部本就会递增 msgVersion，直接调用即可触发重取。 */}
+            <button className="mini-btn" onClick={() => store.selectMessage(messageId)}><RotateCcw size={12} /> 重试</button>
           </div>
         )}
 
@@ -423,13 +432,15 @@ export default function ReaderPane({ onBack }) {
           { label: m.read ? '标记为未读' : '标记为已读', icon: <Mail size={13} />, onClick: () => doRead(!m.read) },
           { label: m.important ? '取消星标' : '加星标', icon: <Star size={13} />, onClick: () => doFlag(!m.important) },
           { divider: true },
-          { label: '添加标签…', icon: <Tag size={13} />, onClick: () => {
-            const lb = window.prompt('输入标签名（如：课程、助教、奖学金）：');
-            if (lb && lb.trim()) doLabel(lb.trim());
-          } },
+          { label: '添加标签…', icon: <Tag size={13} />, onClick: () => { setMenu(null); setLabelOpen(true); } },
         ] : []}
       />
       {addingEvent && m && <AddEventModal candidate={addingEvent} msg={m} onClose={() => setAddingEvent(null)} onAdded={(ev) => { setEvents((l) => [...l, ev]); toast('已加入内置日历', 'success'); }} />}
+      {/* BUG-58：用主题化 Modal 替代 window.prompt（原生弹窗与暗色主题割裂、无法定制按钮） */}
+      {labelOpen && <LabelInputModal
+        onClose={() => setLabelOpen(false)}
+        onSubmit={(name) => { doLabel(name); setLabelOpen(false); }}
+      />}
       {preview && <FileViewer att={preview} onClose={() => setPreview(null)} />}
     </div>
   );
@@ -498,6 +509,32 @@ function shortTitle(subject, c) {
   if (c.type === 'due') return `${base}（截止）`;
   if (c.type === 'exam') return `${base}（考试）`;
   return base;
+}
+
+/** BUG-58：标签输入弹窗，替代 window.prompt */
+function LabelInputModal({ onClose, onSubmit }) {
+  const [text, setText] = useState('');
+  const submit = () => { const v = text.trim(); if (v) onSubmit(v); };
+  return (
+    <Modal title="添加标签" onClose={onClose} footer={(
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>取消</button>
+        <button className="btn primary" disabled={!text.trim()} onClick={submit}>添加</button>
+      </div>
+    )}>
+      <div className="ev-form">
+        <input
+          className="inp"
+          autoFocus
+          placeholder="如：课程、助教、奖学金…"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
+        />
+        <div className="dim">标签只保存在本机，不会同步回邮箱服务器。</div>
+      </div>
+    </Modal>
+  );
 }
 
 export function dotColor(m, accounts) {

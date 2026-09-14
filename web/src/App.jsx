@@ -42,10 +42,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    // 系统托盘通知不需要；页面隐藏时的通知提示放在 TopBar 铃铛
-  }, []);
-
   if (!ready) {
     return (
       <div className="boot-screen">

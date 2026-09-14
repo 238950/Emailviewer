@@ -1,5 +1,5 @@
 // 附件库：按类型分组 + “杂项（水印/免责声明等）”自动归类，统一预览器
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, Download, Save, Search, Image as ImageIcon, Trash2, Inbox as InboxIcon, AlertTriangle, Eye, RotateCcw } from 'lucide-react';
 import { useStore, ATTACH_GROUPS } from '../store.js';
 import { api, attUrl, downloadUrl, downloadAttachment, fmtBytes, fmtDate } from '../api.js';
@@ -19,6 +19,9 @@ export default function AttachmentsView() {
   const [page, setPage] = useState(0);
   const [preview, setPreview] = useState(null);
   const [accountSel, setAccountSel] = useState([]);
+  // P2-5：批量下载进度 + 可中止
+  const [dl, setDl] = useState(null);          // null | { done, total, failed, cancelled }
+  const cancelDlRef = useRef(false);
   // 排序：默认按时间（最新在前），可切换按大小
   const [sortBy, setSortBy] = useState(settings?.attachmentSort === 'size' ? 'size' : 'createdAt');
   const [sortDir, setSortDir] = useState(settings?.attachmentSortDir === 'asc' ? 'asc' : 'desc');
@@ -71,21 +74,41 @@ export default function AttachmentsView() {
     } catch (e) { toast(e.message, 'error'); }
   };
 
-  /** BUG-38：不再用 window.open('_blank') 留下空白标签页，改为直接触发下载 */
-  const download = async (att) => {
-    try { await downloadAttachment(att.id, att.filename); } catch (e) { toast(e.message, 'error'); }
+  /** BUG-38：不再用 window.open('_blank') 留下空白标签页，改为直接触发下载。
+   *  返回 true/false 以便批量下载统计失败数（单条下载仍会 toast 具体错误）。 */
+  const download = async (att, silent = false) => {
+    try { await downloadAttachment(att.id, att.filename); return true; }
+    catch (e) { if (!silent) toast(e.message, 'error'); return false; }
   };
 
-  /** 批量下载当前页附件（逐个触发，浏览器会按顺序存入下载目录） */
+  /**
+   * P2-5：批量下载当前页附件（逐个串行，浏览器会按顺序存入下载目录）。
+   * 改进点：① 显示 done/total 进度并统计失败数，不再只弹一句"开始下载"；
+   *         ② 提供「取消」——中止后已完成的部分保留，不丢已下到的文件。
+   */
   const downloadAll = async () => {
-    if (!data?.list?.length) return;
-    toast(`开始下载 ${data.list.length} 个附件…`, 'info');
-    for (const a of data.list) {
-      // 逐个串行，避免浏览器并发拦截
+    const list = data?.list || [];
+    if (!list.length || dl) return;
+    cancelDlRef.current = false;
+    let failed = 0;
+    setDl({ done: 0, total: list.length, failed: 0, cancelled: false });
+    for (let i = 0; i < list.length; i++) {
+      if (cancelDlRef.current) break;
+      // 批量时静默单条 toast，避免几十条错误刷屏；最后统一汇总
       // eslint-disable-next-line no-await-in-loop
-      await download(a);
+      const ok = await download(list[i], true);
+      if (!ok) failed++;
+      setDl({ done: i + 1, total: list.length, failed, cancelled: false });
     }
+    const cancelled = cancelDlRef.current;
+    setDl(null);
+    cancelDlRef.current = false;
+    if (cancelled) toast('已取消批量下载（已下载的文件保留）', 'info');
+    else if (failed) toast(`已下载 ${list.length - failed}/${list.length} 个，${failed} 个失败`, 'error');
+    else toast(`已下载全部 ${list.length} 个附件`, 'success');
   };
+
+  const cancelDownloadAll = () => { cancelDlRef.current = true; };
 
   /** BUG-40：手动把某条附件移出/移入“杂项”，或恢复自动判定 */
   const setJunk = async (att, junk) => {
@@ -147,10 +170,19 @@ export default function AttachmentsView() {
             <input type="checkbox" checked={showJunk} onChange={(e) => { setShowJunk(e.target.checked); setPage(0); }} />
             在全部中显示杂项
           </label>
-          <button className="mini-btn" onClick={downloadAll} disabled={!data?.list?.length}
-            title="逐个下载当前页的全部附件（浏览器会依次保存到下载目录）">
-            <Download size={12} /> 下载本页全部
-          </button>
+          {dl ? (
+            <>
+              <span className="dim" style={{ whiteSpace: 'nowrap' }}>
+                {dl.done}/{dl.total}{dl.failed ? `（失败 ${dl.failed}）` : ''}
+              </span>
+              <button className="mini-btn danger" onClick={cancelDownloadAll} title="中止批量下载（已下载的文件会保留）">取消</button>
+            </>
+          ) : (
+            <button className="mini-btn" onClick={downloadAll} disabled={!data?.list?.length}
+              title="逐个下载当前页的全部附件（浏览器会依次保存到下载目录）">
+              <Download size={12} /> 下载本页全部
+            </button>
+          )}
         </div>
         <div className="attach-filter">
           <div className="search-wrap">
