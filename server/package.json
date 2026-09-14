@@ -1,0 +1,16 @@
+{
+  "name": "mailview-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "邮件查看器本地后端：Express + imapflow + mailparser",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "imapflow": "^1.0.165",
+    "mailparser": "^3.7.2"
+  }
+}

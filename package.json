@@ -1,0 +1,12 @@
+{
+  "name": "student-mail-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "学生邮件查看器：多账户 IMAP 收件箱、AI 分类、日历提醒（本地运行）",
+  "scripts": {
+    "postinstall": "cd server && npm.cmd install && cd .. && cd web && npm.cmd install",
+    "dev:server": "cd server && npm.cmd run dev",
+    "build:web": "cd web && npm.cmd run build",
+    "start": "cd server && npm.cmd start"
+  }
+}

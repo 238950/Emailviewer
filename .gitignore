@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+
+# npm 本地缓存（仅供离线安装，非源码）
+.npm-cache/
+
+# 运行时数据（含真实邮件、附件缓存、加密密钥）——绝不提交
+server/data/
+server/public/
+web/dist/
+
+# 日志
+*.log
+launcher.log
+
+# 构建与打包产物
+*.exe
+*.pdb
+
+# 开发调试用临时浏览器 profile 与探针输出
+dev/.e2eprofile*/
+dev/.probe*
+.tmp/
+tmp/
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
