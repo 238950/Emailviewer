@@ -231,7 +231,7 @@ try {
     $__i++
     $__fn = ($__i.ToString() + '_' + [System.IO.Path]::GetFileName([string]$__a.FileName))
     try { $__a.SaveAsFile((Join-Path '${esc(tmp)}' $__fn)) } catch { continue }
-    # BUG-04 修复：读取内嵌图片的 Content-ID（PR_ATTACH_CONTENT_ID = 0x3712001E），
+    # 读取内嵌图片的 Content-ID（PR_ATTACH_CONTENT_ID = 0x3712001E），
     # 否则正文里的 src="cid:xxx" 无法与附件对应，会显示裂图。
     $__cid = ''
     try { $__cid = [string]$__a.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x3712001E') } catch { $__cid = '' }
