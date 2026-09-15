@@ -16,8 +16,7 @@ export default function HomeView() {
   const [doneOpen, setDoneOpen] = useState(false);
   const [doneData, setDoneData] = useState(null);
 
-  // BUG-57：listKey 在「任何」列表动作后都会递增（标记已读/星标/标签/已处理/同步…），
-  // 原先每次变化都立即重取 /home，且 accountId 未变时等同重复请求同一份数据。
+  // listKey 在「任何」列表动作后都会递增（标记已读/星标/标签/已处理/同步…），
   // 这里统一走去抖 + 并发去重：300ms 内的多次触发只发一次，
   // 已在途时不再叠加（用 inFlight ref），避免用户连点卡片打出一串请求。
   const debounceRef = useRef(null);

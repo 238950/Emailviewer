@@ -1,4 +1,6 @@
 // 邮件查看器本地服务入口：REST API + 托管前端静态资源
+// 必须最先加载：把 server/.env 里的配置（如 AI API Key）注入 process.env
+import { ENV_FILES_LOADED } from './env.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,6 +45,9 @@ const HOST = process.env.HOST || '127.0.0.1';
 const server = http.createServer(app);
 server.listen(PORT, HOST, () => {
   logger.info('main', `邮件查看器已启动： http://${HOST}:${PORT}   (数据目录: ${DATA_DIR})`);
+  logger.info('main', ENV_FILES_LOADED.length
+    ? `已加载 .env： ${ENV_FILES_LOADED.join(' , ')}`
+    : '未发现 .env 文件（AI Key 将使用设置页保存的值）');
   console.log('\n  ✉  学生邮件查看器已启动');
   console.log(`  ➜  请在浏览器打开： http://${HOST}:${PORT}\n`);
   if (process.env.OPEN_BROWSER === '1') {
@@ -60,7 +65,7 @@ server.on('error', (e) => {
 });
 
 /**
- * BUG-44：进程级兜底。
+ * 进程级兜底。
  * 即便有统一错误中间件，仍可能有中间件之外的地方（定时器回调、事件监听、后台任务）
  * 抛出未捕获异常。这两处钩子至少保证：① 日志里留下完整堆栈便于事后定位；
  * ② uncaughtException 之后进程状态已不可信，记录后主动退出，交由启动脚本重启，

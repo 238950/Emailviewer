@@ -19,6 +19,17 @@ const check = (id, name, pass, detail = '') => {
   console.log(`[${pass ? 'PASS' : 'FAIL'}] ${id} ${name}${detail ? ` — ${detail}` : ''}`);
 };
 
+// 账户标识从被测实例现取，避免把任何真实邮箱写进仓库
+const ACC_EMAIL = await (async () => {
+  try {
+    const r = await (await fetch(`${APP}/api/accounts`)).json();
+    const list = r.accounts || [];
+    const a = list.find((x) => x.email) || list[0] || {};
+    return String(a.email || a.name || '');
+  } catch { return ''; }
+})();
+const [ACC_PREFIX = '', ACC_DOMAIN = ''] = ACC_EMAIL.split('@');
+
 let chromeProc = null;
 let chromeErr = '';
 try {
@@ -63,7 +74,7 @@ try {
   await send('Runtime.enable', {});
   await send('Page.enable', {});
 
-  // ---------- BUG-05 / BUG-30：文件夹名只显示末段 ----------
+  // ----------/文件夹名只显示末段 ----------
   await send('Page.navigate', { url: `${APP}/#view=mail` });
   await sleep(2600);
   const folders = await ev(`(() => {
@@ -75,7 +86,8 @@ try {
   })()`);
   const texts = folders.map((f) => f.text.trim());
   const uniq = new Set(texts);
-  check('BUG-05a', '左侧文件夹名不再带账号前缀', texts.length > 0 && texts.every((t) => !t.includes('you') && !t.includes('example.com')),
+  check('BUG-05a', '左侧文件夹名不再带账号前缀',
+    !!ACC_PREFIX && texts.length > 0 && texts.every((t) => !t.includes(ACC_PREFIX) && !t.includes(ACC_DOMAIN)),
     JSON.stringify(texts.slice(0, 8)));
   check('BUG-05b', '文件夹名互不重复且可区分', uniq.size === texts.length, `${uniq.size}/${texts.length} 唯一`);
   check('BUG-05c', '被截断的行数为 0（宽度足够显示末段）', folders.every((f) => !f.clipped),
@@ -83,10 +95,10 @@ try {
   check('BUG-05d', 'hover 提示给出完整路径', folders.some((f) => f.title.includes('›')), folders[0]?.title || '');
 
   const listTitle = await ev(`(() => { const t=document.querySelector('.list-title'); return t ? t.textContent.trim().slice(0,60) : ''; })()`);
-  const dupAcc = (listTitle.match(/you@outlook\.com/g) || []).length;
+  const dupAcc = ACC_EMAIL ? listTitle.split(ACC_EMAIL).length - 1 : 0;
   check('BUG-30', '邮件列表标题不再重复账户名', dupAcc <= 1, `标题：${listTitle}`);
 
-  // ---------- BUG-06：账户可展开/折叠 ----------
+  // ----------账户可展开/折叠 ----------
   const toggles = await ev(`document.querySelectorAll('.acc-fold-hint').length`);
   const accs = await ev(`document.querySelectorAll('.acc-block').length`);
   check('BUG-06a', '每个账户都有展开/折叠按钮', toggles === accs && accs > 0, `按钮 ${toggles} / 账户 ${accs}`);
@@ -100,7 +112,7 @@ try {
   const afterExpand = await ev(`document.querySelectorAll('.folder-row').length`);
   check('BUG-06c', '再次点击可重新展开', afterExpand === before, `${afterCollapse} → ${afterExpand}`);
 
-  // ---------- BUG-07：搜索框方向键不被列表劫持 ----------
+  // ----------搜索框方向键不被列表劫持 ----------
   // 先选中一封邮件（否则“选中项未变化”是无意义的断言）
   await ev(`(() => { const r=document.querySelector('.mail-row'); if(r){r.click();return true;} return false; })()`);
   await sleep(1500);
@@ -128,7 +140,7 @@ try {
   check('BUG-07b', '焦点不在输入框时方向键仍可切换邮件', selAfterBody !== selBefore,
     `选中 ${JSON.stringify(selBefore)} → ${JSON.stringify(selAfterBody)}`);
 
-  // ---------- BUG-08：主题跟随后端设置 ----------
+  // ----------主题跟随后端设置 ----------
   const apiTheme = await (await fetch(`${APP}/api/settings`)).json();
   const domTheme = await ev(`document.documentElement.dataset.theme`);
   const lsTheme = await ev(`localStorage.getItem('mailview.theme')`);
@@ -145,7 +157,7 @@ try {
   })()`);
   void wroteBack;
 
-  // ---------- BUG-22：统一收件箱默认全选 ----------
+  // ----------统一收件箱默认全选 ----------
   await send('Page.navigate', { url: `${APP}/#view=smart` });
   await sleep(2600);
   const chips = await ev(`(() => {
@@ -160,7 +172,7 @@ try {
   const cleared = await ev(`(() => ({ on: document.querySelectorAll('.acc-chip.on').length, warn: !!document.querySelector('.smart-warn'), rows: document.querySelectorAll('.mail-row').length }))()`);
   check('BUG-22b', '取消全部勾选时给出明确提示而不是静默查第一个账户', cleared.on === 0 && cleared.warn, JSON.stringify(cleared));
 
-  // ---------- BUG-20：术语区分（已读 / 已处理） ----------
+  // ----------术语区分（已读 / 已处理） ----------
   await send('Page.navigate', { url: `${APP}/#view=home` });
   await sleep(2600);
   const wording = await ev(`(() => { const t=document.body.innerText; return { hasDoneBtn: t.includes('已处理'), oldDoneBtn: [...document.querySelectorAll('.card-done-btn')].some(b=>b.textContent.trim()==='已阅'), foot: (document.querySelector('.done-archive-btn')||{}).textContent || '' }; })()`);

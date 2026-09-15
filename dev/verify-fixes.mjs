@@ -35,7 +35,7 @@ async function main() {
   if (!health.json?.ok) throw new Error('服务未运行，请先启动 server（MAILVIEW_PORT=' + PORT + '）');
   console.log(`\n=== 验证目标：${BASE} ===\n`);
 
-  /* ---------- BUG-16：来源校验（CSRF） ---------- */
+  /* ----------来源校验（CSRF） ---------- */
   {
     const forged = await put('/api/settings', { theme: 'dark' }, { headers: { Origin: 'https://evil.example.com' } });
     record('BUG-16a', '伪造 Origin 的写请求被拒绝', forged.status === 403, `HTTP ${forged.status} ${forged.json?.error || ''}`);
@@ -55,7 +55,7 @@ async function main() {
     record('BUG-16e', '伪造 Origin 未改写设置', themeNow !== 'dark' || true, `当前 theme=${themeNow}`);
   }
 
-  /* ---------- BUG-17：请求体大小限制 ---------- */
+  /* ----------请求体大小限制 ---------- */
   {
     const big = 'x'.repeat(8 * 1024 * 1024);
     const r = await post('/api/settings', { attachmentSaveDir: big });
@@ -63,7 +63,7 @@ async function main() {
     record('BUG-17', '8MB 请求体被拒绝（413）', limited, `HTTP ${r.status} ${r.json?.error || ''}`);
   }
 
-  /* ---------- BUG-32：未知 /api 路由返回 JSON 404 ---------- */
+  /* ----------未知 /api 路由返回 JSON 404 ---------- */
   {
     const r = await get('/api/definitely-not-exist');
     const isJson = r.contentType.includes('application/json');
@@ -71,7 +71,7 @@ async function main() {
       `HTTP ${r.status} ct=${r.contentType} body=${r.text.slice(0, 60)}`);
   }
 
-  /* ---------- BUG-24：不存在的账户设为主账户 → 404 且不清空主标记 ---------- */
+  /* ----------不存在的账户设为主账户 → 404 且不清空主标记 ---------- */
   {
     const before = (await get('/api/accounts')).json.accounts;
     const r = await post('/api/accounts/does-not-exist/primary', {});
@@ -82,13 +82,13 @@ async function main() {
       `HTTP ${r.status}；主账户数 ${beforePrimary} → ${afterPrimary}`);
   }
 
-  /* ---------- BUG-25：删除不存在的事件 → 404 ---------- */
+  /* ----------删除不存在的事件 → 404 ---------- */
   {
     const r = await del('/api/events/nope-does-not-exist');
     record('BUG-25', '删除不存在的事件返回 404', r.status === 404, `HTTP ${r.status}`);
   }
 
-  /* ---------- BUG-26：事件时间校验 ---------- */
+  /* ----------事件时间校验 ---------- */
   {
     const bad = await post('/api/events', { title: '校验测试', startMs: 'abc' });
     record('BUG-26a', 'startMs="abc" 被拒绝', bad.status === 400, `HTTP ${bad.status} ${bad.json?.error || ''}`);
@@ -108,7 +108,7 @@ async function main() {
     }
   }
 
-  /* ---------- BUG-27：设置项类型校验 ---------- */
+  /* ----------设置项类型校验 ---------- */
   {
     const before = (await get('/api/settings')).json.settings;
     const bad = await put('/api/settings', { syncIntervalMin: 'abc' });
@@ -127,7 +127,7 @@ async function main() {
     record('BUG-27e', '合法设置仍可保存', goodWindow.status === 200, `HTTP ${goodWindow.status}`);
   }
 
-  /* ---------- BUG-35：分页参数越界 ---------- */
+  /* ----------分页参数越界 ---------- */
   {
     const r = await get('/api/messages?pageSize=-1&page=-5');
     const o = r.json || {};
@@ -137,7 +137,7 @@ async function main() {
     record('BUG-35c', 'pageSize=99999 夹取到上限 200', big.json?.pageSize === 200, `pageSize=${big.json?.pageSize}`);
   }
 
-  /* ---------- BUG-09：hydrateNewLimit 生效（设置可读写 + 服务端引用） ---------- */
+  /* ----------hydrateNewLimit 生效（设置可读写 + 服务端引用） ---------- */
   {
     const s = (await get('/api/settings')).json.settings;
     const orig = s.hydrateNewLimit;
@@ -148,7 +148,7 @@ async function main() {
       `原值 ${orig} → 30 → ${back.json?.settings?.hydrateNewLimit}`);
   }
 
-  /* ---------- BUG-33 / BUG-40：附件口径一致 + 杂项改判 ---------- */
+  /* ----------/附件口径一致 + 杂项改判 ---------- */
   {
     const all = await get('/api/attachments?pageSize=1&includeJunk=1');
     const groups = await get('/api/attachments/groups');
@@ -182,7 +182,7 @@ async function main() {
     }
   }
 
-  /* ---------- BUG-29：开机自启回读不再乱码 ---------- */
+  /* ----------开机自启回读不再乱码 ---------- */
   {
     const st = await get('/api/autostart');
     const cmd = st.json?.command || '';
@@ -191,7 +191,7 @@ async function main() {
       `command=${cmd || '(空)'} launcher=${st.json?.launcher} exeExists=${st.json?.exeExists}`);
   }
 
-  /* ---------- BUG-19：日期识别收紧（通过接口观察） ---------- */
+  /* ----------日期识别收紧（通过接口观察） ---------- */
   {
     const msgs = (await get('/api/messages?pageSize=200')).json?.list || [];
     let totalCands = 0;
@@ -210,7 +210,7 @@ async function main() {
       `40 封邮件共 ${totalCands} 个候选`);
   }
 
-  /* ---------- BUG-34：批量标记复用连接（对外可观察字段） ---------- */
+  /* ----------批量标记复用连接（对外可观察字段） ---------- */
   {
     const msgs = (await get('/api/messages?pageSize=3')).json?.list || [];
     if (msgs.length) {
@@ -224,7 +224,7 @@ async function main() {
     }
   }
 
-  /* ---------- BUG-20：done 语义与已读分离（接口层） ---------- */
+  /* ----------done 语义与已读分离（接口层） ---------- */
   {
     const msgs = (await get('/api/messages?pageSize=1')).json?.list || [];
     const m = msgs[0];
@@ -241,7 +241,7 @@ async function main() {
     }
   }
 
-  /* ---------- BUG-18：停用全部账户时首页为空（回归） ---------- */
+  /* ----------停用全部账户时首页为空（回归） ---------- */
   {
     const home = await get('/api/home');
     const j = home.json || {};

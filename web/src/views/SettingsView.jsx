@@ -16,8 +16,7 @@ export default function SettingsView() {
 
   useEffect(() => { setSettingsLocal(settings); }, [settings]);
 
-  // BUG-56：设置保存串行化。
-  // 原先每次 save() 都并发发一个 PUT，busy 只用于禁用按钮、不阻止并发。
+  // 设置保存串行化。
   // 快速连调多个开关时，最终落库的值取决于响应到达顺序——可能不是用户最后操作的那个。
   // 这里用 ref 记录"是否有保存在途"，在途时把最新 patch 攒起来，完成后合并再发一次，
   // 既保证顺序（最后一次操作一定最后落库），又不丢中间改动。
@@ -90,7 +89,7 @@ export default function SettingsView() {
 /* ---------- 账户 ---------- */
 function AccountsTab({ accounts, refreshStatus, toast, setNewAccountOpen }) {
   const [editing, setEditing] = useState(null);
-  const [ask, setAsk] = useState(null);   // BUG-58：主题化确认弹窗
+  const [ask, setAsk] = useState(null);   // 主题化确认弹窗
   const { selectAccount, setView } = useStore();
   const setPrimary = async (id) => {
     try { await api.post(`/api/accounts/${id}/primary`); await refreshStatus(true); toast('已设为主账户', 'success'); } catch (e) { toast(e.message, 'error'); }
@@ -99,7 +98,6 @@ function AccountsTab({ accounts, refreshStatus, toast, setNewAccountOpen }) {
     try { await api.post(`/api/accounts/${id}/sync`); toast('同步完成', 'success'); } catch (e) { toast(e.message, 'error'); }
     refreshStatus(true);
   };
-  // BUG-58：改为主题化确认弹窗（原生 confirm 在暗色下刺眼，且被浏览器抑制时会静默返回 false）
   const del = (a) => {
     setAsk({
       title: '删除账户',
@@ -232,7 +230,7 @@ function AiTab({ toast }) {
   const [cfg, setCfg] = useState(null);
   const [testing, setTesting] = useState('');
   const [saving, setSaving] = useState(false);
-  const [ask, setAsk] = useState(null);     // BUG-58：主题化确认弹窗
+  const [ask, setAsk] = useState(null);     // 主题化确认弹窗
   const [typedKeys, setTypedKeys] = useState({});
   const [models, setModels] = useState({});            // providerKey -> [模型名]
   const [loadingModels, setLoadingModels] = useState({});
@@ -246,11 +244,13 @@ function AiTab({ toast }) {
       setCfg(r.ai);
       setTypedKeys({});
       if (!silent) toast('AI 配置已保存', 'success');
+      // 由 .env 托管的密钥不会被写库，后端会回传一条说明
+      if (Array.isArray(r.notices) && r.notices.length) toast(r.notices[0], 'info');
       return true;
     } catch (e) { toast(e.message, 'error'); return false; }
     finally { setSaving(false); }
   };
-  /** BUG-36：开关/服务商这类开关改动立即落库，不必再滚到底部点保存 */
+  /** 开关/服务商这类开关改动立即落库，不必再滚到底部点保存 */
   const saveNow = async (patch) => {
     const next = { ...cfg, ...patch };
     setCfg(next);
@@ -304,7 +304,7 @@ function AiTab({ toast }) {
   };
 
   /** 删除某个 AI 服务商模块（传 null 给服务端表示删除） */
-  const removeProvider = (k) => {                 // BUG-58：主题化确认弹窗
+  const removeProvider = (k) => {                 // 主题化确认弹窗
     const label = cfg?.providers?.[k]?.label || k;
     setAsk({
       title: '删除服务商',
@@ -326,7 +326,7 @@ function AiTab({ toast }) {
   };
 
   /** 恢复内置服务商列表（保留已填写 Key） */
-  const resetProviders = () => {                  // BUG-58：主题化确认弹窗
+  const resetProviders = () => {                  // 主题化确认弹窗
     setAsk({
       title: '恢复内置服务商列表',
       confirmText: '恢复',
@@ -346,7 +346,7 @@ function AiTab({ toast }) {
   const activeP = cfg.providers[cfg.active];
   const aiReady = !!(cfg.enabled && activeP && activeP.hasKey && activeP.baseUrl);
   const engineText = aiReady
-    ? `当前引擎：${activeP.label}（${activeP.model}，Key ${activeP.keyPreview || ''}）——新邮件正在自动 AI 分类/摘要`
+    ? `当前引擎：${activeP.label}（${activeP.model}，Key ${activeP.keyPreview || ''}${activeP.envManaged ? '，来自 .env' : ''}）——新邮件正在自动 AI 分类/摘要`
     : cfg.enabled && activeP && activeP.baseUrl && !activeP.hasKey
       ? `已启用但「${cfg.active}」尚未配置有效 Key —— 分类与摘要将使用本地关键词规则（不会调用任何外部接口）`
       : cfg.enabled && !cfg.providers[cfg.active] ? '服务商配置缺失' : '当前未启用 AI —— 邮件分类/摘要使用本地关键词规则，不调用任何外部接口';
@@ -356,6 +356,8 @@ function AiTab({ toast }) {
       <div className="sec-head"><b>AI 智能（分类 / 一句话摘要）</b></div>
       <p className="dim">兼容任意「OpenAI 兼容」接口：填 Base URL + API Key + 模型名。内置 DeepSeek / OpenAI / Kimi / 智谱GLM / 通义千问 / 本地 Ollama 预设。
         <b>未启用或未配置有效 Key 时，只会使用本地关键词规则，绝不调用外部接口。</b></p>
+      <p className="dim note">密钥推荐写在 <code>server/.env</code> 里（变量名 <code>AI_API_KEY_服务商名大写</code>，如 <code>AI_API_KEY_GATEWAY</code>），
+        <b>优先级高于这里的输入框</b>；标有「由 .env 管理」的服务商，其输入框会被禁用，改 Key 请直接改该文件并重启服务。</p>
 
       <div className={`ai-banner ${aiReady ? 'on' : 'off'}`}>
         <span className={`ai-dot ${aiReady ? 'on' : ''}`} />
@@ -371,7 +373,7 @@ function AiTab({ toast }) {
 
       <div className="field-label">默认使用服务商（切换后立即生效）</div>
       <select className="sel" value={cfg.active} onChange={(e) => saveNow({ active: e.target.value })}>
-        {Object.entries(cfg.providers || {}).map(([k, p]) => <option key={k} value={k}>{p.label}（{k}）{p.hasKey ? ' ✓' : ''}</option>)}
+        {Object.entries(cfg.providers || {}).map(([k, p]) => <option key={k} value={k}>{p.label}（{k}）{p.hasKey ? (p.envManaged ? ' ✓ .env' : ' ✓') : ''}</option>)}
       </select>
 
       <div className="ai-providers">
@@ -384,8 +386,9 @@ function AiTab({ toast }) {
                 <span className="dim">{p.model}</span>
                 <div className="ai-prov-actions">
                   <button className="mini-btn" onClick={() => test(k)}>{testing === k ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} 测试</button>
-                  {p.hasKey && <span className="ok-text"><CheckCircle2 size={11} /> 已配置 <code className="key-mask">{p.keyPreview}</code></span>}
-                  {p.apiKey && !p.hasKey && <span className="dim">（新 Key 待保存）</span>}
+                  {p.envManaged && <span className="ok-text" title="该服务商的密钥来自 server/.env 文件，优先级高于此处输入"><CheckCircle2 size={11} /> 由 .env 管理 <code className="key-mask">{p.keyPreview}</code></span>}
+                  {!p.envManaged && p.hasKey && <span className="ok-text"><CheckCircle2 size={11} /> 已配置 <code className="key-mask">{p.keyPreview}</code></span>}
+                  {!p.envManaged && p.apiKey && !p.hasKey && <span className="dim">（新 Key 待保存）</span>}
                   <button className="mini-btn danger" title="删除该服务商模块" onClick={() => removeProvider(k)}><Trash2 size={12} /> 删除</button>
                 </div>
               </div>
@@ -418,10 +421,13 @@ function AiTab({ toast }) {
                   className="inp"
                   type="password"
                   autoComplete="new-password"
-                  placeholder={p.hasKey ? '' : 'API Key'}
-                  value={typedKeys[k] || ''}
+                  placeholder={p.envManaged ? '由 server/.env 管理' : (p.hasKey ? '' : 'API Key')}
+                  value={p.envManaged ? '' : (typedKeys[k] || '')}
                   onChange={(e) => setKeyInput(k, e.target.value)}
-                  title={p.hasKey ? '已配置密钥；输入新值将替换（留空则保持不变）' : '粘贴 API Key'}
+                  disabled={!!p.envManaged}
+                  title={p.envManaged
+                    ? `密钥由 server/.env 提供（当前 ${p.keyPreview}）；如需更换请修改该文件后重启服务`
+                    : (p.hasKey ? '已配置密钥；输入新值将替换（留空则保持不变）' : '粘贴 API Key')}
                 />
               </div>
               {k === 'ollama' && <div className="dim hint">Ollama：本机装好 Ollama 并拉取模型后，Base URL 填 http://127.0.0.1:11434/v1，Key 可留空。</div>}
@@ -476,13 +482,13 @@ function RulesTab({ toast, accounts, categories }) {
   const [rules, setRules] = useState(null);
   const [editing, setEditing] = useState(null); // null | {} 新增 | rule
   const [applying, setApplying] = useState(false);
-  const [ask, setAsk] = useState(null);         // BUG-58：主题化确认弹窗
+  const [ask, setAsk] = useState(null);         // 主题化确认弹窗
   const load = () => api.get('/api/rules').then((r) => setRules(r.rules)).catch((e) => toast(e.message, 'error'));
   useEffect(() => { load(); }, []);
   const toggleRule = async (r) => {
     try { await api.put(`/api/rules/${r.id}`, { enabled: !r.enabled }); toast(r.enabled ? '已停用' : '已启用', 'success'); load(); } catch (e) { toast(e.message, 'error'); }
   };
-  const del = (id) => {                          // BUG-58：主题化确认弹窗
+  const del = (id) => {                          // 主题化确认弹窗
     setAsk({
       title: '删除过滤规则',
       danger: true,
@@ -646,7 +652,7 @@ function DigestTab({ s, save, busy, toast, categories }) {
     try {
       await save({ digest: form }, '汇总设置已保存');   // 先保存，保证“立即生成”用的是当前窗口设置
       const r = await api.post('/api/digest/now');
-      // BUG-39：提示文案跟随实际 windowHours 设置，不再硬编码 30 小时
+      // 提示文案跟随实际 windowHours 设置，不再硬编码 30 小时
       if (r.digest) toast(`已生成今日汇总：${r.digest.count} 封重点未读（窗口 ${form.windowHours} 小时）`, 'success');
       else toast(`当前没有符合条件（各账户收件箱中最近 ${form.windowHours} 小时内、未读、重点分类）的邮件`, 'info');
     } catch (e) { toast(e.message, 'error'); }
@@ -687,7 +693,7 @@ function DigestTab({ s, save, busy, toast, categories }) {
 function StorageTab({ s, save, busy, toast }) {
   const [st, setSt] = useState(null);
   const [dir, setDir] = useState(s.attachmentSaveDir || '');
-  const [ask, setAsk] = useState(null);        // BUG-58：主题化确认弹窗
+  const [ask, setAsk] = useState(null);        // 主题化确认弹窗
   const load = () => api.get('/api/storage').then(setSt).catch(() => {});
   useEffect(() => { load(); }, []);
   const testDir = async () => {
@@ -696,7 +702,7 @@ function StorageTab({ s, save, busy, toast }) {
       if (r.writable) { toast('目录可写 ✓', 'success'); save({ attachmentSaveDir: dir }, '默认保存目录已更新'); load(); }
     } catch (e) { toast(e.message, 'error'); }
   };
-  const cleanup = () => {                       // BUG-58：主题化确认弹窗
+  const cleanup = () => {                       // 主题化确认弹窗
     setAsk({
       title: '清理附件缓存',
       danger: true,
@@ -745,7 +751,7 @@ function AppearanceTab({ toast }) {
   const { theme, setTheme, settings, refreshStatus } = useStore();
   const options = [['dark', '深色模式'], ['light', '浅色模式'], ['system', '跟随系统']];
   const showDrafts = !!settings?.showDrafts;
-  const markReadOnOpen = settings?.markReadOnOpen !== false;   // 默认开启，可在设置里关掉（BUG-23）
+  const markReadOnOpen = settings?.markReadOnOpen !== false;   // 默认开启，可在设置里关掉
   const junkHideAuto = settings?.junkHideAuto !== false;
   const put = async (patch, msg) => {
     try {

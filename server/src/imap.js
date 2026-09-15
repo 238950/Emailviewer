@@ -189,8 +189,7 @@ export async function fetchMessageSource(accountId, folder, uid) {
 }
 
 /**
- * 批量标记：同一账户的多封邮件复用一条连接（BUG-34）。
- * 以前每封都 connect→login→操作→logout，批量时会被服务器限流。
+ * 批量标记：同一账户的多封邮件复用一条连接。
  */
 export async function setFlagsBatch(items) {
   const imapItems = (items || []).filter((it) => it && it.account && it.account.kind !== 'outlook-local');

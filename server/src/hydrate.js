@@ -186,7 +186,7 @@ export async function finalizeParsed(msg, parsed) {
     try {
       const ds = extractFromMessage(fresh).map((c) => ({
         ms: c.ms, title: String(c.context || '').slice(0, 24), kind: c.type, confidence: c.confidence, source: 'rule',
-      // BUG-19：只落库高置信度候选（截止/考试词紧邻日期），减少首页与日历噪声
+      // 只落库高置信度候选（截止/考试词紧邻日期），减少首页与日历噪声
       })).filter((c) => c.confidence === 'high').slice(0, 6);
       if (ds.length) {
         MessageStore.update(fresh.id, { dates: ds, datesAt: Date.now() });

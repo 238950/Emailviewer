@@ -84,7 +84,7 @@ export default function FolderColumn() {
   const selected = accounts.find((a) => a.id === accountId) || accounts[0];
 
   const renderAccount = (acc) => {
-    const expanded = expandedAccounts.includes(acc.id);   // BUG-06：展开态可再次点击折叠（主账户同样受控）
+    const expanded = expandedAccounts.includes(acc.id);   // 展开态可再次点击折叠（主账户同样受控）
     const accFolders = (folderTree[acc.id] || [])
       .filter((f) => showDrafts || !isDraftFolderName(f.name))   // 草稿箱默认隐藏
       .map((f) => ({

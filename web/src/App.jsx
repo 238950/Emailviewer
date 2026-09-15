@@ -42,6 +42,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 引导失败必须给出明确原因和重试入口。
+  // 用户看到的是"没有账户"的界面，容易误判为数据丢失。
+  if (bootError) {
+    return (
+      <div className="boot-screen">
+        <div className="boot-logo">✉</div>
+        <div className="boot-title">无法连接本地服务</div>
+        <div className="boot-error">{bootError}</div>
+        <div className="dim">请确认邮件查看器的本地服务已启动后重试；刚开机时服务可能仍在启动中。</div>
+        <button className="btn primary" onClick={() => bootstrap()}>重试</button>
+      </div>
+    );
+  }
+
   if (!ready) {
     return (
       <div className="boot-screen">

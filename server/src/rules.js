@@ -18,7 +18,7 @@ function getFieldValue(msg, field) {
   return msg[field];
 }
 
-/** 布尔型条件：不需要 value（BUG-03：以前空 value 会被当成“恒真”） */
+/** 布尔型条件：不需要 value（以前空 value 会被当成“恒真”） */
 const BOOL_FIELDS = new Set(['has_attachment', 'unread']);
 
 function matchCondition(cond, msg) {
@@ -95,7 +95,7 @@ export function applyRulesAndSave(msg, rules) {
 
 /**
  * 对已抓正文的邮件执行规则。
- * BUG-10 修复：按分页循环扫描全部已下载邮件（此前只扫最近 200 封，老邮件永远匹配不到）。
+ * 按分页循环扫描全部已下载邮件（此前只扫最近 200 封，老邮件永远匹配不到）。
  * @returns {{scanned:number, changed:number, truncated:boolean}}
  */
 export function applyRulesToHydrated(accountId, rules, { maxScan = 10000 } = {}) {

@@ -1,4 +1,4 @@
-// BUG-42 回归验证：附件库「MIME 大类筛选」下推 SQL 后，结果必须与旧的 JS 过滤完全等价。
+// 回归验证：附件库「MIME 大类筛选」下推 SQL 后，结果必须与旧的 JS 过滤完全等价。
 // 做法：对真实数据库，用 SQL 下推路径 vs 全量取回内存过滤，逐分组对比 total 与 id 集合。
 // 用法：node dev/verify-attach-pushdown.mjs
 import { AttachmentStore } from '../server/src/store.js';
@@ -66,7 +66,7 @@ for (const g of GROUPS) {
   check('组合条件等价：image + minSize>=1000', same, `下推=${got.length} 内存=${want.length}`);
 }
 
-// 分组统计口径 vs 下推筛选口径（BUG-33 的一致性同样适用于下推后）
+// 分组统计口径 vs 下推筛选口径（的一致性同样适用于下推后）
 {
   const stats = AttachmentStore.stats({});
   let allOk = true; const detail = [];

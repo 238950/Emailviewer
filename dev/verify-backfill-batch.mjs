@@ -1,4 +1,4 @@
-// BUG-43 回归验证：启动回填的「批量取正文」必须与旧「逐封 detail()」结果完全一致。
+// 回归验证：启动回填的「批量取正文」必须与旧「逐封 detail()」结果完全一致。
 // 用法：node dev/verify-backfill-batch.mjs
 import { MessageStore } from '../server/src/store.js';
 

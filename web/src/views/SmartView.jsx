@@ -1,5 +1,5 @@
 // 智能收件箱：多账户统一收件箱 + 分类 + 标签过滤
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Sparkles, Layers, Tag } from 'lucide-react';
 import { useStore, M } from '../store.js';
 import { api } from '../api.js';
@@ -10,14 +10,17 @@ const CATS = ['course', 'assignment', 'grade', 'club', 'system', 'promo', 'spam'
 
 export default function SmartView() {
   const { accounts, status, categories, categoryColors, messageId, closeMessage } = useStore();
-  // BUG-22：统一收件箱默认汇总全部账户（而不是只勾主账户）
+  // 统一收件箱默认汇总全部账户（而不是只勾主账户）
   const [selected, setSelected] = useState(() => accounts.map((a) => a.id));
   // 账户列表加载晚于首渲染时补全默认选择
+  // 只补一次。原先以 selected.length === 0 判定"尚未初始化"，无法区分
+  // "用户主动点了取消全选"，于是状态轮询更新 accounts 引用后会把清空的选择重新填成全选，
+  // 用户会发现自己的选择被撤销、列表突然重新加载全部账户。
+  const seededRef = useRef(false);
   useEffect(() => {
-    setSelected((s) => {
-      if (s.length || !accounts.length) return s;
-      return accounts.map((a) => a.id);
-    });
+    if (seededRef.current || !accounts.length) return;
+    seededRef.current = true;
+    setSelected((s) => (s.length ? s : accounts.map((a) => a.id)));
   }, [accounts]);
   const [cats, setCats] = useState([]);
   const [labels, setLabels] = useState([]);        // [{name,count}]

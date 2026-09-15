@@ -20,7 +20,7 @@ export function prettyFolder(name) {
 
 /**
  * 界面显示用的文件夹名：只取路径最后一段再译中文。
- * BUG-05/30：Outlook 的 `\\账号\Inbox` 以前会把账号名一起显示，把真正有区分度的名字挤没了。
+ * Outlook 的 `\\账号\Inbox` 以前会把账号名一起显示，把真正有区分度的名字挤没了。
  */
 export function displayName(fname) {
   const s = String(fname || '');

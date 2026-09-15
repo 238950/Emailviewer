@@ -22,7 +22,7 @@ export function pushNewMailNotice(account, newCount, { firstSync = false } = {})
   const s = getSettings();
   if (!s.newMailNotify) return null;
   if (!newCount || newCount <= 0) return null;
-  // 通知预览只取该账户「收件箱」里的邮件（BUG-41）：
+  // 通知预览只取该账户「收件箱」里的邮件：
   // 此前不带 folder 过滤，会把已归档/已移动/已删除的旧邮件也算进来，
   // 导致预览条目与"刚收到"的语义不符（Outlook 桌面账户的收件箱还是 \账号\Inbox 这类路径）。
   const inbox = resolveInboxFolders([account.id]);
@@ -74,7 +74,7 @@ export async function runHydration(accountId = null) {
   busy.hydrating = true;
   try {
     const accounts = accountId ? AccountStore.list().filter((a) => a.id === accountId) : AccountStore.list().filter((a) => a.enabled);
-    // BUG-09：每轮抓取封数由设置「每次同步后台抓取正文的封数」决定（0 = 不预取正文）
+    // 每轮抓取封数由设置「每次同步后台抓取正文的封数」决定（0 = 不预取正文）
     const perRound = clampLimit(getSettings().hydrateNewLimit, 60, 0, 500);
     if (perRound === 0) return;
     for (const acc of accounts) {
@@ -181,7 +181,7 @@ export function composeDigest(opts = {}) {
   const windowMs = (Number(dg.windowHours) || 30) * 3600000;
   const sinceMs = Date.now() - windowMs;
   const cats = dg.importantCategories?.length ? dg.importantCategories : ['assignment', 'grade', 'course', 'club'];
-  // BUG-01 修复：Outlook 桌面账户的收件箱是 “\账号\Inbox” 路径，必须按账户解析真实文件夹名
+  // Outlook 桌面账户的收件箱是 “\账号\Inbox” 路径，必须按账户解析真实文件夹名
   const inbox = resolveInboxFolders(null);
   if (!inbox.accountIds.length) return null;
   if (!inbox.folders.length) {
@@ -294,7 +294,7 @@ export function startServices() {
   try {
     const rows = MessageStore.query({ bodyFetched: true, pageSize: 200 }).list;
 
-    // 性能优化（BUG-43）：先判定哪些邮件「真的需要读正文重算日期」，
+    // 性能优化：先判定哪些邮件「真的需要读正文重算日期」，
     // 再用一次查询把这些邮件的正文批量取回（原先在循环里对每封调 detail()，
     // 200 封就是 200 次额外 SQL + 200 次对象构造，启动瞬间有可感知的同步 IO 尖峰）。
     const needBody = [];
@@ -312,7 +312,7 @@ export function startServices() {
       if (!m.worthReason) { const w = localWorth(m); patch.worth = w.worth; patch.worthReason = w.reason; patch.ai_attempted = 0; scored++; }
       const stored = Array.isArray(m.dates) ? m.dates : [];
       const hasAi = stored.some((d) => d.source === 'ai');
-      // BUG-19：老库里的日期是用“泛触发词”识别的（没有 confidence 字段），噪声极大。
+      // 老库里的日期是用“泛触发词”识别的（没有 confidence 字段），噪声极大。
       // 这里用收紧后的规则重算一次；重算不出高置信度候选就清空，避免污染首页与日历。
       const needsRefresh = stored.length === 0 || (!hasAi && stored.some((d) => !d.confidence));
       if (needsRefresh && !hasAi) {

@@ -1,10 +1,9 @@
-// BUG-44 对照实验：证明全局错误中间件确实兜住了 async 路由抛出的异常。
+// 对照实验：证明全局错误中间件确实兜住了 async 路由抛出的异常。
 // 用法：node dev/verify-error-middleware-unit.mjs
 //
 // 思路：起两个临时 Express 应用（一模一样，只有一个挂了错误中间件），
 // 各注册一条会 throw 的 wrap(async) 路由，然后看客户端拿到什么。
 // 注意：这里故意不真去测"进程退出"——那会杀掉测试进程本身；
-//      改为断言"无中间件时响应不是结构化 JSON"，这与进程终止是同一个根因。
 
 import { createRequire } from 'node:module';
 import path from 'node:path';

@@ -164,7 +164,7 @@ try {
   // ===== B) 智能收件箱：勾选副账号 → 标签筛选 → 预览 =====
   await goUrl(APP + '/#view=smart');
   await sleep(1800);
-  // BUG-22 之后“统一收件箱”默认勾选全部账户，因此这里只在未勾选时才点击（点击会取消勾选）
+  // 之后“统一收件箱”默认勾选全部账户，因此这里只在未勾选时才点击（点击会取消勾选）
   const accChip = await pageEval.ev(`(() => {
     const c=[...document.querySelectorAll('.acc-chip')].find(e=>(e.textContent||'').includes('1155'));
     if (!c) return false;

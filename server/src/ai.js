@@ -1,8 +1,25 @@
 // AI 层：OpenAI 兼容 API 通用客户端 + 邮件分类/摘要 + 关键词兜底
+import './env.js';
+import { apiKeyFromEnv } from './env.js';
 import { getSettings, catLabel } from './settings.js';
 import { MessageStore } from './store.js';
 import { stripHtml, makeSnippetText, keywordSummary, trunc } from './util.js';
 import { extractFromMessage } from './nlp.js';
+
+/**
+ * 解析某个服务商的可用密钥：**.env 优先，数据库配置兜底**。
+ * 空白字符串（如 " "）一律视为未配置——旧版会把一个空格当成"已填 Key"。
+ * @param {string} name 服务商 key（如 gateway / deepseek）
+ * @param {string} dbKey 数据库里存的 apiKey
+ * @returns {{key:string, source:'env'|'db'|'none'}}
+ */
+export function resolveApiKey(name, dbKey) {
+  const fromEnv = apiKeyFromEnv(name);
+  if (fromEnv) return { key: fromEnv, source: 'env' };
+  const fromDb = String(dbKey == null ? '' : dbKey).trim();
+  if (fromDb) return { key: fromDb, source: 'db' };
+  return { key: '', source: 'none' };
+}
 
 /** 解析当前生效的 AI 提供方配置；不可用时返回 {ok:false, reason} */
 export function activeProvider() {
@@ -12,8 +29,9 @@ export function activeProvider() {
   const p = ai.providers && ai.providers[ai.active];
   if (!p) return { ok: false, reason: '未找到服务商配置' };
   if (!p.baseUrl) return { ok: false, reason: 'Base URL 为空' };
-  if (!p.apiKey) return { ok: false, reason: 'API Key 为空' };
-  return { ok: true, name: ai.active, label: p.label, baseUrl: p.baseUrl.replace(/\/+$/, ''), model: p.model || '', apiKey: p.apiKey };
+  const { key, source } = resolveApiKey(ai.active, p.apiKey);
+  if (!key) return { ok: false, reason: 'API Key 为空（请在 .env 或设置页配置）' };
+  return { ok: true, name: ai.active, label: p.label, baseUrl: p.baseUrl.replace(/\/+$/, ''), model: p.model || '', apiKey: key, keySource: source };
 }
 
 /**
@@ -258,7 +276,7 @@ async function classifyChunk(batch, { save = true } = {}) {
       }).filter(Boolean);
     }
     if (!dates.length) {
-      // BUG-19：AI 未给出可用日期时，规则兜底也只接受高置信度候选
+      // AI 未给出可用日期时，规则兜底也只接受高置信度候选
       dates = extractFromMessage(m)
         .map((c) => ({ ms: c.ms, title: String(c.context || '').slice(0, 24), kind: c.type, confidence: c.confidence, source: 'rule' }))
         .filter((c) => c.confidence === 'high')
@@ -308,14 +326,16 @@ export async function testProvider(providerKey) {
   const p = ai.providers && ai.providers[providerKey];
   if (!p) throw new Error('未找到该服务商配置');
   if (!p.baseUrl) throw new Error('Base URL 为空');
-  if (!p.apiKey) throw new Error('API Key 为空');
+  // 密钥解析：.env 优先，数据库兜底；空白字符视为未配置
+  const { key, source } = resolveApiKey(providerKey, p.apiKey);
+  if (!key) throw new Error('API Key 为空（请在 .env 或设置页配置）');
   const saved = ai.active;
   ai.active = providerKey;
   // 直接调用底层接口，避免依赖 activeProvider 的全局开关
   const body = { model: p.model, messages: [{ role: 'user', content: '你好' }], max_tokens: 8, stream: false };
   const res = await fetch(`${String(p.baseUrl).replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${p.apiKey}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(45000),
   });
@@ -327,7 +347,7 @@ export async function testProvider(providerKey) {
   const data = await res.json();
   const reply = data?.choices?.[0]?.message?.content;
   if (!reply) throw new Error('接口未返回内容');
-  return { ok: true, model: p.model, reply: String(reply).slice(0, 60) };
+  return { ok: true, model: p.model, reply: String(reply).slice(0, 60), keySource: source };
 }
 
 export { catLabel };

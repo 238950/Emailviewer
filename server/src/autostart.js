@@ -13,7 +13,7 @@ const VALUE_NAME = 'StudentMailViewer';
 
 const supported = process.platform === 'win32';
 
-/** 启动命令：统一使用 EmailViewer.exe silent（无 .bat / .vbs，见 BUG-14） */
+/** 启动命令：统一使用 EmailViewer.exe silent（无 .bat / .vbs） */
 export function launcherCommand() {
   if (fs.existsSync(EXE_PATH)) return `"${EXE_PATH}" silent`;
   return '';
@@ -30,7 +30,7 @@ function reg(args) {
 const PS = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 
 /**
- * BUG-29：reg.exe 的 stdout 走控制台代码页（GBK），Node 按 UTF-8 解码会让中文路径变乱码。
+ * reg.exe 的 stdout 走控制台代码页（GBK），Node 按 UTF-8 解码会让中文路径变乱码。
  * 改用 PowerShell 读注册表并显式输出 UTF-8，保证界面显示与实际注册值一致。
  */
 function readRunValueViaPowerShell() {

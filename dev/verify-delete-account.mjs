@@ -1,4 +1,4 @@
-// BUG-12 隔离验证：删除账户是否清理派生日历事件与落盘附件文件
+// 隔离验证：删除账户是否清理派生日历事件与落盘附件文件
 // 用法：node dev/verify-delete-account.mjs <被测端口> <被测数据目录>
 import fs from 'node:fs';
 import path from 'node:path';

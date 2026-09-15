@@ -26,16 +26,6 @@ function toLocalMs(year, month, day, hour = 0, minute = 0) {
   return x.getTime();
 }
 
-/** 文本中出现的中文/英文月份名 */
-function matchMonthName(text, idx) {
-  // 形如 "3月" / "March 5" / "5 March"
-  const cn = text.slice(idx).match(/^(\d{1,2})\s*月/);
-  if (cn) return { month: Number(cn[1]), len: cn[0].length };
-  const en = text.slice(idx).toLowerCase().match(/^(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)/);
-  if (en) return { month: MONTHS_EN[en[1]], len: en[0].length };
-  return null;
-}
-
 /** 在位置 i 尝试识别日期表达式，返回 {ms, phrase, end} 或 null。relative=true 表示解析到今天之后 */
 function tryParseDateAt(text, i) {
   const now = new Date();
@@ -57,9 +47,6 @@ function tryParseDateAt(text, i) {
   }
 
   // 下周一 / 下周五 / 周一 / 星期X / 礼拜X / 周X / next Monday / Friday（带 this/next）
-  const wd = rest.match(/^(下|这|本|next|this)?\s*(周|星期|礼拜)?([一二三四五六天日])(的?[上午下午晚上]|(?:周|礼拜|星期)\s*[一二三四五六天日])?/);
-  // 更简单的直接正则
-  const wd2 = rest.match(/^(?:(下周|下星期|下礼拜|next week|下个礼拜|下个星期)\s*)?(?:周|星期|礼拜|周)[一二三四五六天日]/);
   const wd3 = rest.match(/^(?:(下周|下星期|next\s*week\s*)?)(monday|mon|tuesday|tue|tues|wednesday|wed|thursday|thu|thur|friday|fri|saturday|sat|sunday|sun)/i);
 
   let weekdayMatch = null;
@@ -80,14 +67,13 @@ function tryParseDateAt(text, i) {
     return { ms, phrase: weekdayMatch.phrase, end: weekdayMatch.len, weekday: weekdayMatch.num };
   }
 
-  // 今晚/今天 X 点 这类已含上面的 rel（今晚属于 rel）。处理“本周五晚”由上方 wd 分支？忽略。
   // 数字日期： 2025年3月5日 / 3月5日 / 3月5号 / 12月25日(周日) / 3.5 / 3/5 / 03-05 / 5月5日
   const num = rest.match(/^((20\d{2}|19\d{2})年)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?/);
   if (num) {
     const year = num[2] ? Number(num[2]) : now.getFullYear();
     const month = Number(num[3]);
     const day = Number(num[4]);
-    // BUG-19：必须是真实存在的日期，且不落在更长数字串/电话号里
+    // 必须是真实存在的日期，且不落在更长数字串/电话号里
     if (validYmd(year, month, day) && isolated(text, i, i + num[0].length) && !inPhoneContext(text, i)) {
       let y = year;
       // 若为今年早些月份（已过），推明年（如 1月5日，现在是6月）
@@ -189,21 +175,13 @@ const TRIGGER = {
   exam: ['考试', '测验', 'quiz', 'exam', '期中', '期末'],
   event: ['会议', '活动', '讲座', '面试', '聚会', 'meeting', 'event', 'seminar', 'workshop', '报到', '集合'],
 };
-// BUG-19：删除 '日期/时间/安排/于/计划/schedule' 这类泛触发词 —— 它们几乎每句都能命中，
+// 删除 '日期/时间/安排/于/计划/schedule' 这类泛触发词 —— 它们几乎每句都能命中，
 // 会把电话号码、编号、无意义片段都变成“日程”。
-
-function triggerType(word) {
-  const w = String(word).toLowerCase();
-  if (TRIGGER.due.some((t) => w.includes(t.toLowerCase()))) return 'due';
-  if (TRIGGER.exam.some((t) => w.includes(t.toLowerCase()))) return 'exam';
-  if (TRIGGER.event.some((t) => w.includes(t.toLowerCase()))) return 'event';
-  return null;   // 未命中明确语义词 → 不产生候选
-}
 
 const MAX_GAP = 30;        // 触发词与日期之间的最大字符距离
 const HIGH_GAP = 15;       // 触发词紧邻日期（截止/考试）→ 高置信度
 
-/** 合法日期校验：月份 1–12、日期在当月真实存在、年份在合理区间（BUG-19） */
+/** 合法日期校验：月份 1–12、日期在当月真实存在、年份在合理区间 */
 function validYmd(y, m, day) {
   if (!(m >= 1 && m <= 12)) return false;
   if (!(day >= 1 && day <= 31)) return false;
@@ -277,7 +255,7 @@ export function extractDates(text) {
       }
     }
     if (!dates.length) continue;
-    // BUG-19：候选必须与“明确的截止/考试/活动语义词”共现；没有触发词的一律丢弃
+    // 候选必须与“明确的截止/考试/活动语义词”共现；没有触发词的一律丢弃
     for (const dt of dates) {
       const before = trigs
         .filter((tr) => tr.idx <= dt.idx + 2 && dt.idx - tr.idx <= MAX_GAP)

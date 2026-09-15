@@ -1,4 +1,4 @@
-// 一次性清理：删除由 BUG-19 旧版日期识别生成的“噪声日历事件”
+// 一次性清理：删除由旧版日期识别生成的“噪声日历事件”
 // 判定原则：只有 source=auto 且来源邮件当前已不存在对应的高置信/AI 时间点时才删除。
 // 用法：node dev/cleanup-legacy-auto-events.mjs [port] [--apply]
 const b = `http://127.0.0.1:${process.argv[2] || 3869}`;

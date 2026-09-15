@@ -2,8 +2,7 @@
 const BASE = '';
 
 /**
- * BUG-55：请求超时。
- * 原先 fetch 完全不设超时——实测单次 classify 27.5s、并发时达 42s，
+ * 请求超时。
  * 期间用户只能看着转圈、无法取消；切走再切回还会触发重复请求。
  * 这里按端点区分预算：AI 类调用天然慢，给 120s；其余 30s。
  */
@@ -89,7 +88,7 @@ export function downloadUrl(id) {
 }
 
 /**
- * BUG-38：统一下载入口。以前用 window.open(url,'_blank') 会留下一个空白标签页；
+ * 统一下载入口。以前用 window.open(url,'_blank') 会留下一个空白标签页；
  * 这里取回二进制后用隐藏 <a download> 触发，文件名也能正确带上。
  */
 export async function downloadAttachment(id, filename) {

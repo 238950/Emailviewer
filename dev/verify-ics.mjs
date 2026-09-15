@@ -1,4 +1,4 @@
-// BUG-28 验证：导出真实 .ics 文件，检查是否满足 RFC 5545（DTSTAMP / 转义 / 折行 / 全天事件）
+// 验证：导出真实 .ics 文件，检查是否满足 RFC 5545（DTSTAMP / 转义 / 折行 / 全天事件）
 // 用法：node dev/verify-ics.mjs [chromePath]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';

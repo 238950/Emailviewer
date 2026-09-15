@@ -1,4 +1,4 @@
-// P0 修复验证（BUG-44 全局错误中间件 / BUG-45 附件保存目录白名单 / BUG-46 AI 在途去重）
+// P0 修复验证（全局错误中间件 /附件保存目录白名单 /AI 在途去重）
 // 用法：node dev/verify-p0-fixes.mjs [port]
 //
 // 设计原则：
@@ -65,7 +65,7 @@ async function main() {
   }
   console.log(`\n=== P0 修复验证：${BASE} ===\n`);
 
-  /* ============ BUG-44：全局错误中间件 ============ */
+  /* ============全局错误中间件 ============ */
   {
     // 1) 未知 /api 路由仍返回结构化 JSON 404（错误中间件插在 404 之后不应破坏它）
     const notFound = await get('/api/__definitely_not_exists__');
@@ -95,7 +95,7 @@ async function main() {
       alive.networkError ? '连接失败（进程可能已退出）' : `HTTP ${alive.status}`);
   }
 
-  /* ============ BUG-45：附件保存目录白名单 ============ */
+  /* ============附件保存目录白名单 ============ */
   {
     const attId = await pickSavedAttachment();
     if (!attId) {
@@ -142,7 +142,7 @@ async function main() {
     }
   }
 
-  /* ============ BUG-46：AI 在途去重（HTTP 层观测） ============ */
+  /* ============AI 在途去重（HTTP 层观测） ============ */
   {
     // 说明：锁的确定性行为由 dev/verify-ai-lock-unit.mjs 断言（离线、9/9 通过）。
     // 这里只做 HTTP 层的「接线正确性」验证：确认路由确实调用了锁、/status 确实暴露在途表、
@@ -178,7 +178,7 @@ async function main() {
       ghost.status === 404, `HTTP ${ghost.status}`);
   }
 
-  /* ============ 回归：BUG-47 /logs tail 夹取 ============ */
+  /* ============ 回归：/logs tail 夹取 ============ */
   {
     const l1 = await get('/api/logs?tail=999999999');
     record('BUG-47', 'logs tail 参数被夹取（不再整文件读入）',

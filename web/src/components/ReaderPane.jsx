@@ -1,21 +1,22 @@
 // 阅读窗格：邮件头、HTML/文本渲染、附件、AI 摘要、日期提取 → 日历
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
-import { Mail, ChevronLeft, Star, StarOff, Paperclip, Download, Save, Sparkles, Tag, CalendarPlus, RefreshCw, Image as ImageIcon, FileText, Loader2, X, ExternalLink, Clock, RotateCcw, Info, CheckCircle2, Loader, MessageSquare } from 'lucide-react';
+import { Mail, ChevronLeft, Star, StarOff, Paperclip, Download, Save, Sparkles, Tag, CalendarPlus, Image as ImageIcon, FileText, X, ExternalLink, Clock, RotateCcw, Info, CheckCircle2, MessageSquare } from 'lucide-react';
 import { useStore, M } from '../store.js';
-import { api, attUrl, downloadUrl, downloadAttachment, fmtBytes, fmtDate, dayLabel } from '../api.js';
-import { Spinner, Empty, IconBtn, Modal, Chip, PopMenu } from './common.jsx';
+import { api, attUrl, downloadAttachment, fmtBytes, fmtDate, dayLabel } from '../api.js';
+import { Spinner, Empty, IconBtn, Modal, Chip, PopMenu, ConfirmDialog } from './common.jsx';
 import FileViewer from './FileViewer.jsx';
 
 const MAX_INLINE_IMAGE_MB = 15;
 
 export default function ReaderPane({ onBack }) {
   const store = useStore();
-  const { messageId, msgVersion, categories, categoryColors, toast, accounts, refreshStatus, bumpList } = store;
+  const { messageId, msgVersion, categories, categoryColors, toast, accounts, bumpList } = store;
   const [detail, setDetail] = useState(null);
   const [attachments, setAttachments] = useState([]);
   const [events, setEvents] = useState([]);
   const [dates, setDates] = useState([]);
+  const [datesIgnored, setDatesIgnored] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState('');
   const [showRemote, setShowRemote] = useState(false);
@@ -25,18 +26,28 @@ export default function ReaderPane({ onBack }) {
   const [preview, setPreview] = useState(null);
   const [labelOpen, setLabelOpen] = useState(false);
   const [menu, setMenu] = useState(null);
+  const [ask, setAsk] = useState(null);       // 待确认的危险操作（删除日程等）
   const bodyRef = useRef(null);
 
   useEffect(() => {
-    if (messageId == null) { setDetail(null); return; }
+    if (messageId == null) {
+      setDetail(null); setAttachments([]); setEvents([]); setDates([]); setDatesIgnored(false);
+      return;
+    }
+    // 切换邮件时必须先清空上一封的详情与附属数据。
+    // 而所有按钮已指向新的 messageId —— 用户以为在操作 A，实际改的是 B
+    //（已读/星标/标签/已处理全部错位），属会造成真实副作用的对象错位。
+    setDetail(null); setAttachments([]); setEvents([]); setDates([]); setDatesIgnored(false);
     setLoading(true); setFetchError(''); setShowRemote(false); setPreview(null);
     let dead = false;
     api.message(messageId)
       .then(async (r) => {
         if (dead) return;
+        // 双重保险：响应返回时若已切到其它邮件（或服务端返回了非本次请求的邮件），直接丢弃
+        if (String(r.message?.id) !== String(messageId)) return;
         setDetail(r.message); setAttachments(r.attachments || []); setEvents(r.events || []);
         if (r.fetchError) setFetchError(r.fetchError);
-        // 自动标记已读（BUG-23：可在 设置 → 外观 关闭，关掉后完全不动邮箱的未读状态）
+        // 自动标记已读（可在 设置 → 外观 关闭，关掉后完全不动邮箱的未读状态）
         if (!r.message.read && useStore.getState().settings?.markReadOnOpen !== false) {
           try { await api.post(`/api/messages/${r.message.id}/read`, { read: true }); } catch { /* */ }
           store.refreshStatus(true); bumpList();
@@ -44,7 +55,7 @@ export default function ReaderPane({ onBack }) {
         // 预取可提取日期
         try {
           const d = await api.get(`/api/messages/${r.message.id}/dates`);
-          if (!dead) setDates(d.candidates || []);
+          if (!dead) { setDates(d.candidates || []); setDatesIgnored(d.source === 'ignored'); }
         } catch { /* */ }
       })
       .catch((e) => { if (!dead) setFetchError(e.message); })
@@ -66,7 +77,7 @@ export default function ReaderPane({ onBack }) {
       const src = img.getAttribute('src') || '';
       if (src.startsWith('cid:')) {
         const key = src.slice(4).replace(/[<>]/g, '').trim();
-        // BUG-04 兜底：cid 未命中时，按正文中出现顺序与内嵌附件依次配对
+        // 兜底：cid 未命中时，按正文中出现顺序与内嵌附件依次配对
         const id = cidMap[key] || inlinePool[poolIdx++];
         if (id) {
           img.setAttribute('src', attUrl(id));
@@ -87,13 +98,13 @@ export default function ReaderPane({ onBack }) {
       USE_PROFILES: { html: true },
       ADD_ATTR: ['data-remote'],
     });
-    // BUG-53：依赖中不含 showRemote。函数体从未读取它——远程图片的填充由下方
+    // 依赖中不含 showRemote。函数体从未读取它——远程图片的填充由下方
     // 独立 effect 在 showRemote 变化时直接操作 DOM 完成。把 showRemote 放进依赖
     // 会让每次"加载远程图片"都白白重跑一遍 DOMPurify 净化，并因 DOM 被重建
     // 导致图片"先闪一下再出现"。useMemo 依赖应精确反映函数体实际使用的值。
   }, [detail, attachments]);
 
-  // 内嵌图片（有 contentId 且 inline）已渲染在正文里，不在附件区重复展示（BUG-04 附带问题）
+  // 内嵌图片（有 contentId 且 inline）已渲染在正文里，不在附件区重复展示（附带问题）
   const visibleAtts = useMemo(
     () => (attachments || []).filter((a) => !(a.contentId && a.disposition === 'inline')),
     [attachments],
@@ -124,19 +135,29 @@ export default function ReaderPane({ onBack }) {
   const draft = store.messageDraft && store.messageDraft.id === messageId ? store.messageDraft : null;
   const m = detail || draft;
 
+  // 这两个操作原先在 catch 之后仍执行 setDetail 乐观更新，
+  // 于是接口失败时界面显示"已加星标/已读"，服务端其实没变，用户被界面误导。
+  // 现在失败即 return，只有成功才更新本地状态；并校验 detail 仍属于当前邮件。
   const doFlag = async (important) => {
-    try { await api.post(`/api/messages/${messageId}/flag`, { important }); } catch (e) { toast(e.message, 'error'); }
-    setDetail((d) => d && { ...d, important }); bumpList();
+    try { await api.post(`/api/messages/${messageId}/flag`, { important }); }
+    catch (e) { toast(e.message, 'error'); return; }
+    setDetail((d) => (d && String(d.id) === String(messageId) ? { ...d, important } : d));
+    bumpList();
   };
   const doRead = async (read) => {
-    try { await api.post(`/api/messages/${messageId}/read`, { read }); } catch (e) { toast(e.message, 'error'); }
-    setDetail((d) => d && { ...d, read }); store.refreshStatus(true); bumpList();
+    try { await api.post(`/api/messages/${messageId}/read`, { read }); }
+    catch (e) { toast(e.message, 'error'); return; }
+    setDetail((d) => (d && String(d.id) === String(messageId) ? { ...d, read } : d));
+    store.refreshStatus(true); bumpList();
   };
+  /** 仅在详情仍属于当前邮件时更新本地字段（的配套保护：避免旧响应写回新邮件） */
+  const patchDetail = (patch) => setDetail((d) => (d && String(d.id) === String(messageId) ? { ...d, ...patch } : d));
+
   const doLabel = async (label) => {
     try {
       const cur = (m.labels || []).includes(label);
       await api.post(`/api/messages/${messageId}/label`, { label, add: !cur });
-      setDetail((d) => d && { ...d, labels: cur ? (d.labels || []).filter((x) => x !== label) : [...(d.labels || []), label] });
+      patchDetail({ labels: cur ? (m.labels || []).filter((x) => x !== label) : [...(m.labels || []), label] });
     } catch (e) { toast(e.message, 'error'); }
     bumpList();
   };
@@ -144,10 +165,10 @@ export default function ReaderPane({ onBack }) {
     setBusy('classify');
     try {
       const r = await api.post(`/api/messages/${messageId}/classify`);
-      setDetail((d) => d && {
-        ...d, category: r.result.category, categoryReason: r.result.reason,
-        // BUG-37②：摘要来源要如实标注（AI 模型名 / 本地关键词），不再硬编码 'local'
-        aiSummary: r.result.summary || d.aiSummary,
+      patchDetail({
+        category: r.result.category, categoryReason: r.result.reason,
+        // ②：摘要来源要如实标注（AI 模型名 / 本地关键词），不再硬编码 'local'
+        aiSummary: r.result.summary || m?.aiSummary,
         aiSummaryModel: r.result.model || (r.result.summary ? 'ai' : 'local'),
       });
       toast(`已分类为「${M.catLabel(r.result.category, categories)}」`, 'success');
@@ -157,7 +178,7 @@ export default function ReaderPane({ onBack }) {
     setBusy('summarize');
     try {
       const r = await api.post(`/api/messages/${messageId}/summarize`);
-      setDetail((d) => d && { ...d, aiSummary: r.result.summary, aiSummaryModel: r.result.model });
+      patchDetail({ aiSummary: r.result.summary, aiSummaryModel: r.result.model });
       toast('已生成一句话摘要', 'success');
     } catch (e) { toast(e.message, 'error'); } finally { setBusy(''); }
   };
@@ -168,11 +189,11 @@ export default function ReaderPane({ onBack }) {
     } catch (e) { toast(e.message, 'error'); }
   };
 
-  /** 标记/取消“已处理（本机归档）”：与「已读」不同，只在本地隐藏，不改邮箱状态（BUG-20） */
+  /** 标记/取消“已处理（本机归档）”：与「已读」不同，只在本地隐藏，不改邮箱状态 */
   const doDone = async (done) => {
     try {
       await api.post(`/api/messages/${messageId}/done`, { done });
-      setDetail((d) => (d ? { ...d, done } : d));
+      patchDetail({ done });
       toast(done ? '已标记为已处理：首页将隐藏这封邮件（左下角「重要已处理」可找回）' : '已取消已处理', 'success');
       bumpList();
     } catch (e) { toast(e.message, 'error'); }
@@ -181,7 +202,7 @@ export default function ReaderPane({ onBack }) {
     useStore.getState().sendMailToAI([messageId], '请阅读这封邮件：它讲了什么？需要我做什么？有没有截止时间或值得参加的信息？');
     toast('已把这封邮件发给 AI 助手', 'success');
   };
-  /** 把检测到的所有时间一键加入内置日历（BUG-19：同一时间点只建一条，重复点击不会重复建） */
+  /** 把检测到的所有时间一键加入内置日历（同一时间点只建一条，重复点击不会重复建） */
   const addAllDates = async () => {
     if (!dates.length) return;
     setBusy('dates');
@@ -215,14 +236,29 @@ export default function ReaderPane({ onBack }) {
     } catch (e) { toast(e.message, 'error'); } finally { setBusy(''); }
   };
 
-  /** BUG-19：识别有误时一键忽略，不再污染首页「临近截止」与日历 */
+  /**
+   * 识别有误时一键忽略，不再污染首页「临近截止」与日历。
+   * 忽略状态现在会持久化（dates_ignored），刷新/重开邮件后依然生效。
+   */
   const ignoreDates = async () => {
     setBusy('dates');
     try {
-      const r = await api.post(`/api/messages/${messageId}/dates/clear`);
+      await api.post(`/api/messages/${messageId}/dates/clear`, { ignored: true });
       toast('已忽略这封邮件识别出的时间', 'success');
-      void r;
       setDates([]);
+      setDatesIgnored(true);
+      bumpList();
+    } catch (e) { toast(e.message, 'error'); } finally { setBusy(''); }
+  };
+  /** 忽略后提供恢复入口，避免成为无法回退的死路 */
+  const restoreDates = async () => {
+    setBusy('dates');
+    try {
+      await api.post(`/api/messages/${messageId}/dates/clear`, { ignored: false });
+      const d = await api.get(`/api/messages/${messageId}/dates`);
+      setDates(d.candidates || []);
+      setDatesIgnored(d.source === 'ignored');
+      toast((d.candidates || []).length ? '已恢复识别结果' : '已恢复识别（这封邮件没有可识别的时间）', 'success');
       bumpList();
     } catch (e) { toast(e.message, 'error'); } finally { setBusy(''); }
   };
@@ -267,7 +303,7 @@ export default function ReaderPane({ onBack }) {
                 <span className="r-addr">{m.fromAddr}</span>
                 {m.important && <Chip color="#f59e0b">★ 重要</Chip>}
                 <span className="cat-badge" style={{ background: M.catColor(m.category, categoryColors), color: '#fff' }}>{M.catLabel(m.category, categories)}</span>
-                {/* BUG-20：把「已读」（会同步回邮箱）与「已处理」（仅本机归档）两个状态分开显示 */}
+                {/* 把「已读」（会同步回邮箱）与「已处理」（仅本机归档）两个状态分开显示 */}
                 <Chip color={m.read ? '#64748b' : '#22c55e'} title={m.read ? '邮箱里的状态为已读' : '邮箱里的状态为未读'}>{m.read ? '已读' : '未读'}</Chip>
                 {m.done && <Chip color="#0ea5e9" title="仅在本机归档：首页不再显示，不影响邮箱">已处理（本机归档）</Chip>}
                 {(m.labels || []).map((l) => <Chip key={l} color="#8b5cf6" onClick={() => doLabel(l)} title="再次点击移除标签">{l}</Chip>)}
@@ -320,10 +356,11 @@ export default function ReaderPane({ onBack }) {
               <b>正文获取失败：</b>{fetchError}
               <div className="dim">可能是网络或邮箱服务器暂时不可用。</div>
             </div>
-            {/* BUG-52：原先用 setTimeout(50) 先清空再重设 messageId 来"强制重取"，
-                这是魔法数字竞态（时序一变就点了没反应），且 timer 无清理——
-                用户快速切走邮件后它仍会执行，把旧邮件强行弹回来。
-                selectMessage 内部本就会递增 msgVersion，直接调用即可触发重取。 */}
+            {/*
+ * 这是魔法数字竞态（时序一变就点了没反应），且 timer 无清理——
+ * 用户快速切走邮件后它仍会执行，把旧邮件强行弹回来。
+ * selectMessage 内部本就会递增 msgVersion，直接调用即可触发重取。
+ */}
             <button className="mini-btn" onClick={() => store.selectMessage(messageId)}><RotateCcw size={12} /> 重试</button>
           </div>
         )}
@@ -376,6 +413,19 @@ export default function ReaderPane({ onBack }) {
           </div>
         )}
 
+        {/* 忽略状态可见 + 可恢复，避免用户点过一次"忽略"后无法回退 */}
+        {!loading && m && datesIgnored && (
+          <div className="date-cands">
+            <div className="sec-title">
+              <CalendarPlus size={13} /> 已忽略识别到的时间
+              <button className="mini-btn" disabled={busy === 'dates'} onClick={restoreDates}>
+                {busy === 'dates' ? <Spinner /> : <RotateCcw size={12} />} 恢复识别
+              </button>
+            </div>
+            <div className="dim">这封邮件识别出的时间已被忽略，不会再出现在首页「临近截止」与日历建议里。</div>
+          </div>
+        )}
+
         {!loading && m && dates.length > 0 && (
           <div className="date-cands">
             <div className="sec-title">
@@ -415,7 +465,15 @@ export default function ReaderPane({ onBack }) {
                   <b>{ev.title}</b>
                   <div className="dim">{fmtDate(ev.startMs, { full: true })}</div>
                 </div>
-                <IconBtn danger title="删除该事件" onClick={async () => { try { await api.del(`/api/events/${ev.id}`); toast('已删除', 'success'); setEvents((l) => l.filter((x) => x.id !== ev.id)); } catch (e) { toast(e.message, 'error'); } }}>
+                <IconBtn danger title="删除该事件" onClick={() => setAsk({
+                  title: '删除日程',
+                  body: `确定删除日程「${ev.title}」吗？\n${fmtDate(ev.startMs, { full: true })}\n对应的提醒会一并删除，且无法撤销。`,
+                  danger: true, confirmText: '删除',
+                  onOk: async () => {
+                    try { await api.del(`/api/events/${ev.id}`); toast('已删除', 'success'); setEvents((l) => l.filter((x) => x.id !== ev.id)); }
+                    catch (e) { toast(e.message, 'error'); }
+                  },
+                })}>
                   <X size={13} />
                 </IconBtn>
               </div>
@@ -436,12 +494,13 @@ export default function ReaderPane({ onBack }) {
         ] : []}
       />
       {addingEvent && m && <AddEventModal candidate={addingEvent} msg={m} onClose={() => setAddingEvent(null)} onAdded={(ev) => { setEvents((l) => [...l, ev]); toast('已加入内置日历', 'success'); }} />}
-      {/* BUG-58：用主题化 Modal 替代 window.prompt（原生弹窗与暗色主题割裂、无法定制按钮） */}
+      {/* 用主题化 Modal 替代 window.prompt（原生弹窗与暗色主题割裂、无法定制按钮） */}
       {labelOpen && <LabelInputModal
         onClose={() => setLabelOpen(false)}
         onSubmit={(name) => { doLabel(name); setLabelOpen(false); }}
       />}
       {preview && <FileViewer att={preview} onClose={() => setPreview(null)} />}
+      <ConfirmDialog req={ask} onClose={() => setAsk(null)} />
     </div>
   );
 }
@@ -511,7 +570,7 @@ function shortTitle(subject, c) {
   return base;
 }
 
-/** BUG-58：标签输入弹窗，替代 window.prompt */
+/** 标签输入弹窗，替代 window.prompt */
 function LabelInputModal({ onClose, onSubmit }) {
   const [text, setText] = useState('');
   const submit = () => { const v = text.trim(); if (v) onSubmit(v); };

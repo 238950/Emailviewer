@@ -34,9 +34,32 @@ export function Chip({ children, color, onClick, active, title }) {
 }
 
 export function Modal({ title, onClose, children, wide, footer }) {
+  // 配套：Esc 关闭 + 关闭后把焦点还给触发元素。
+  // onClose 每次渲染都是新函数，用 ref 持有以免 effect 反复重建、焦点被反复抢回。
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const prev = document.activeElement;
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      closeRef.current?.();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      if (prev && typeof prev.focus === 'function' && document.contains(prev)) prev.focus();
+    };
+  }, []);
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className={`modal${wide ? ' wide' : ''}`} onClick={(e) => e.stopPropagation()}>
+      <div
+        className={`modal${wide ? ' wide' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={typeof title === 'string' ? title : undefined}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-head">
           <div className="modal-title">{title}</div>
           <IconBtn title="关闭" onClick={onClose}><X size={16} /></IconBtn>
@@ -115,7 +138,7 @@ export function useModalState() {
 }
 
 /**
- * BUG-58：主题化的确认弹窗，替代 window.confirm。
+ * 主题化的确认弹窗，替代 window.confirm。
  * 原生 confirm 在暗色模式下刺眼、按钮文案无法定制（改不成"永久删除/保留"），
  * 且部分浏览器"禁止再弹窗"后会静默返回 false，用户误以为操作已生效。
  * 用法：

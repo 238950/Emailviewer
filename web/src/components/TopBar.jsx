@@ -23,7 +23,7 @@ export default function TopBar() {
   const bellRef = useRef(null);
 
   // 铃铛：轮询通知（提醒/每日汇总）
-  // BUG-51：依赖里不能放 `status`。App.jsx 每 10 秒 refreshStatus 一次，
+  // 依赖里不能放 `status`。App.jsx 每 10 秒 refreshStatus 一次，
   // status 一变这个 effect 就被销毁重建，20 秒的定时器在第 10 秒就被重置，
   // 永远等不到触发（铃铛几乎不刷新）。改为只依赖 view，
   // 需要读状态时在 load 内部用 useStore.getState() 现取。

@@ -1,6 +1,6 @@
 // 邮件列表核心组件（邮箱视图 / 智能收件箱 / 分类视图复用）
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, Paperclip, Star, StarOff, CheckCheck, ArrowDown, ArrowUp, ChevronLeft, ChevronRight, MoreVertical, Tag, SlidersHorizontal, Inbox, Clock, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Search, Paperclip, Star, StarOff, CheckCheck, ArrowDown, ArrowUp, ChevronLeft, ChevronRight, MoreVertical, Tag, SlidersHorizontal, Inbox, X, AlertCircle, RotateCcw } from 'lucide-react';
 import { useStore, M } from '../store.js';
 import { api, fmtDate, dayLabel } from '../api.js';
 import { Spinner, Empty, PopMenu, Modal } from './common.jsx';
@@ -16,6 +16,8 @@ export default function MailListView({ title, queryBase = {}, onPick, emptyHint,
   const { categories, categoryColors, toast, bumpList, listKey, msgVersion } = store;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
   const [page, setPage] = useState(0);
   const [group, setGroup] = useState(groupDefault);
   const [sort, setSort] = useState('date');
@@ -23,15 +25,34 @@ export default function MailListView({ title, queryBase = {}, onPick, emptyHint,
   const [quick, setQuick] = useState('');     // unread | attach | star
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState({ q: '', from: '', bodyQ: '', fromDate: '' });
+  const [appliedSearch, setAppliedSearch] = useState(search);
   const [catSel, setCatSel] = useState([]);
   const [labelSel, setLabelSel] = useState([]);
   const [attType, setAttType] = useState('');
   const [menuMsg, setMenuMsg] = useState(null);
   const [labelModal, setLabelModal] = useState(null); // {msg, labels}
-  const searchTimer = useRef(null);
+
+  // 搜索输入先防抖 400ms 再参与查询。
+  // 于是每敲一个字都打一次接口，而页码复位又慢半拍。
+  useEffect(() => {
+    const t = setTimeout(() => setAppliedSearch(search), 400);
+    return () => clearTimeout(t);
+  }, [search]);
 
   // 组装查询（依赖用标量，queryBase 仅在其 JSON 变化时重算）
   const qbKey = JSON.stringify(queryBase);
+
+  // 筛选条件变化必须同步复位页码。
+  // 停在旧页码上就会出现"有匹配邮件却显示空列表 + 第 3 页 / 共 1 页"。
+  // 这里用"渲染期修正 state"（React 官方推荐模式），在副作用取数之前完成复位，
+  // 避免先按旧页码发一次无效请求。
+  const filterKey = JSON.stringify([qbKey, quick, sort, dir, catSel, labelSel, appliedSearch, attType]);
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
+  if (prevFilterKey !== filterKey) {
+    setPrevFilterKey(filterKey);
+    setPage(0);
+  }
+
   const builtQuery = useMemo(() => {
     const base = qbKey ? JSON.parse(qbKey) : {};
     const q = { ...base, sort, dir, page, pageSize: 80 };
@@ -40,30 +61,38 @@ export default function MailListView({ title, queryBase = {}, onPick, emptyHint,
     if (quick === 'star') q.important = true;
     if (catSel.length) q.category = catSel;
     if (labelSel.length) q.label = labelSel;
-    if (search.q) q.q = search.q;
-    if (search.from) q.from = search.from;
-    if (search.bodyQ) q.bodyQ = search.bodyQ;
-    if (search.fromDate) q.fromDate = new Date(Date.now() - Number(search.fromDate) * 86400000).getTime();
+    if (appliedSearch.q) q.q = appliedSearch.q;
+    if (appliedSearch.from) q.from = appliedSearch.from;
+    if (appliedSearch.bodyQ) q.bodyQ = appliedSearch.bodyQ;
+    if (appliedSearch.fromDate) q.fromDate = new Date(Date.now() - Number(appliedSearch.fromDate) * 86400000).getTime();
     if (attType) q.attachmentType = attType;
     return q;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qbKey, sort, dir, page, quick, catSel, labelSel, search.q, search.from, search.bodyQ, search.fromDate, attType, listKey, msgVersion]);
+  }, [qbKey, sort, dir, page, quick, catSel, labelSel, appliedSearch, attType, listKey, msgVersion, reloadKey]);
 
   useEffect(() => {
-    setLoading(true);
+    setLoading(true); setError('');
     let dead = false;
     api.messages(builtQuery)
       .then((r) => { if (!dead) setData(r); })
-      .catch((e) => { if (!dead) toast(e.message, 'error'); setData(null); })
+      .catch((e) => {
+        // 整段失败分支都要受 !dead 保护。
+        // "旧请求失败"会把"新请求已成功"的列表清空，用户看到的是空列表而不是错误。
+        if (dead) return;
+        setError(e.message || '加载失败');
+      })
       .finally(() => { if (!dead) setLoading(false); });
     return () => { dead = true; };
   }, [builtQuery]);
 
-  // 键盘 ↑/↓（BUG-07：输入框内不劫持方向键）
+  // 键盘 ↑/↓（输入框内不劫持方向键）
   useEffect(() => {
     const h = (e) => {
       const t = e.target;
       if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+      // 弹窗/右键菜单打开时不劫持方向键。
+      // 会切换底层的邮件；若开着"打开即标已读"，还会连带改动邮箱的真实未读状态。
+      if (document.querySelector('.modal-overlay, .popmenu, .drawer-mask.open')) return;
       if (!data || !data.list.length) return;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         const idx = data.list.findIndex((m) => m.id === store.messageId);
@@ -178,11 +207,11 @@ export default function MailListView({ title, queryBase = {}, onPick, emptyHint,
       {searchOpen && (
         <div className="search-panel">
           <input className="inp" placeholder="搜主题 / 发件人 / 收件人…" value={search.q}
-            onChange={(e) => { setSearch((s) => ({ ...s, q: e.target.value })); clearTimeout(searchTimer.current); searchTimer.current = setTimeout(() => setPage(0), 400); }} />
+            onChange={(e) => setSearch((s) => ({ ...s, q: e.target.value }))} />
           <input className="inp" placeholder="正文包含（需已抓取正文）" value={search.bodyQ}
-            onChange={(e) => { setSearch((s) => ({ ...s, bodyQ: e.target.value })); clearTimeout(searchTimer.current); searchTimer.current = setTimeout(() => setPage(0), 400); }} />
+            onChange={(e) => setSearch((s) => ({ ...s, bodyQ: e.target.value }))} />
           <input className="inp" placeholder="发件人含…" value={search.from}
-            onChange={(e) => { setSearch((s) => ({ ...s, from: e.target.value })); clearTimeout(searchTimer.current); searchTimer.current = setTimeout(() => setPage(0), 400); }} />
+            onChange={(e) => setSearch((s) => ({ ...s, from: e.target.value }))} />
           <select className="sel" value={search.fromDate} onChange={(e) => { setSearch((s) => ({ ...s, fromDate: e.target.value })); setPage(0); }}>
             <option value="">不限日期</option><option value="1">最近 24 小时</option><option value="7">最近 7 天</option>
             <option value="30">最近 30 天</option><option value="90">最近 90 天</option>
@@ -217,7 +246,18 @@ export default function MailListView({ title, queryBase = {}, onPick, emptyHint,
 
       <div className="mail-list">
         {loading && !data && <div className="list-loading"><Spinner /> 加载中…</div>}
-        {!loading && (!data || !data.list.length) && (
+        {/* 失败态与"真的没有邮件"必须区分开，并给出重试入口 */}
+        {!loading && error && (
+          <div className="fetch-error">
+            <AlertCircle size={14} />
+            <div>
+              <b>列表加载失败：</b>{error}
+              <div className="dim">可能是本地服务未就绪或网络暂时不可用，已保留上一次的结果。</div>
+            </div>
+            <button className="mini-btn" onClick={() => setReloadKey((k) => k + 1)}><RotateCcw size={12} /> 重试</button>
+          </div>
+        )}
+        {!loading && !error && (!data || !data.list.length) && (
           <Empty icon={<Inbox size={32} />} text="这里没有邮件" sub="试试切换筛选条件，或点右上角「刷新」同步新邮件" />
         )}
         {grouped.map((g, gi) => (

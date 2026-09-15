@@ -30,7 +30,7 @@ export const useStore = create((set, get) => ({
   smartAccountIds: [],    // 智能收件箱选中的账户
   smartCategories: [],    // 智能收件箱分类过滤
 
-  // BUG-08：初始主题跟随系统的浅/深色；本地只作“临时覆盖”，后端 settings.theme 才是持久偏好
+  // 初始主题跟随系统的浅/深色；本地只作“临时覆盖”，后端 settings.theme 才是持久偏好
   theme: localStorage.getItem(THEME_KEY) || 'system',
   toasts: [],
   notifications: [],
@@ -47,15 +47,16 @@ export const useStore = create((set, get) => ({
     localStorage.setItem(THEME_KEY, theme);
     set({ theme });
     applyTheme(theme);
-    // BUG-08：同时写回后端设置，换浏览器/清缓存后偏好仍在
+    // 同时写回后端设置，换浏览器/清缓存后偏好仍在
     api.put('/api/settings', { theme }).catch(() => {});
   },
 
   async bootstrap() {
+    set({ bootError: '' });
     try {
       const [presets, settings] = await Promise.all([api.presets(), api.settings()]);
       const st = await api.status().catch(() => null);
-      // BUG-08：没有本地覆盖时，采用后端持久化的主题偏好
+      // 没有本地覆盖时，采用后端持久化的主题偏好
       const localTheme = localStorage.getItem(THEME_KEY);
       const theme = localTheme || (settings.settings && settings.settings.theme) || 'system';
       set({
@@ -73,7 +74,9 @@ export const useStore = create((set, get) => ({
       });
       applyTheme(theme);
     } catch (e) {
-      set({ ready: true, bootError: e.message });
+      // 引导失败时不能把 ready 置为 true。
+      // 用户会以为数据丢失而不是本地服务没起来，也无法重试。
+      set({ ready: false, bootError: e.message || '无法连接本地服务' });
     }
   },
 
@@ -82,7 +85,11 @@ export const useStore = create((set, get) => ({
       const st = await api.status();
       const prev = get().status;
       // 内容未变化则不触发重渲染（避免每 10 秒全树抖动）
-      if (prev && JSON.stringify(prev) === JSON.stringify(st)) return;
+      // 比较时必须排除 serverTime —— 它每次请求都不同，
+      // 否则这个"无变化就跳过"的保护永远不会生效，等于每 10 秒让全树重渲染一次，
+      // 并顺带把 accounts 换成新数组引用（下游依赖 accounts 的 effect 会被无谓触发）。
+      const strip = (s) => { if (!s) return s; const { serverTime, ...rest } = s; void serverTime; return rest; };
+      if (prev && JSON.stringify(strip(prev)) === JSON.stringify(strip(st))) return;
       set({
         status: st,
         accounts: st.accounts,

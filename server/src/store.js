@@ -142,8 +142,10 @@ for (const ddl of [
   "ALTER TABLE message ADD COLUMN done_at INTEGER DEFAULT 0",
   "ALTER TABLE message ADD COLUMN dates_json TEXT DEFAULT '[]'",
   "ALTER TABLE message ADD COLUMN dates_at INTEGER DEFAULT 0",
+  // 区分「尚未提取日期」与「用户主动忽略」。
+  "ALTER TABLE message ADD COLUMN dates_ignored INTEGER DEFAULT 0",
   "ALTER TABLE message ADD COLUMN hidden INTEGER DEFAULT 0",
-  // BUG-33/40：杂项判定落库，附件库的列表计数与分组统计才能用同一口径；
+  // 杂项判定落库，附件库的列表计数与分组统计才能用同一口径；
   // junk_override 记录用户“这条不是杂项 / 就是杂项”的手动改判（NULL = 用自动判定）
   "ALTER TABLE attachment ADD COLUMN junk INTEGER DEFAULT 0",
   "ALTER TABLE attachment ADD COLUMN junk_override INTEGER DEFAULT NULL",
@@ -222,7 +224,7 @@ export const AccountStore = {
     run(`UPDATE account SET ${sets.join(', ')} WHERE id = ?`, vals);
   },
   /**
-   * 删除账户及其全部本地痕迹（BUG-12）：
+   * 删除账户及其全部本地痕迹：
    * 文件夹 / 邮件 / 附件行 / 由该账户邮件派生的事件 / 落盘的附件缓存文件。
    * 返回删除统计，便于界面如实告知释放了多少空间。
    */
@@ -313,7 +315,7 @@ export const FolderStore = {
 };
 
 /* ================= 邮件 ================= */
-const MSG_COLS = 'id, account_id, folder, uid, msg_id, subject, from_addr, from_name, to_list, cc_list, date_ms, received_ms, size, flags, read, important, has_attachments, att_json, snippet, body_fetched, category, category_reason, category_model, category_at, ai_attempted, worth, worth_reason, done, done_at, hidden, dates_json, dates_at, ai_summary, ai_summary_model, ai_summary_at, labels, created_at';
+const MSG_COLS = 'id, account_id, folder, uid, msg_id, subject, from_addr, from_name, to_list, cc_list, date_ms, received_ms, size, flags, read, important, has_attachments, att_json, snippet, body_fetched, category, category_reason, category_model, category_at, ai_attempted, worth, worth_reason, done, done_at, hidden, dates_json, dates_at, dates_ignored, ai_summary, ai_summary_model, ai_summary_at, labels, created_at';
 
 function rowToMsg(r) {
   return {
@@ -325,7 +327,7 @@ function rowToMsg(r) {
     hasAttachments: !!r.has_attachments, attMeta: safeJson(r.att_json, []),
     snippet: r.snippet || '', bodyFetched: !!r.body_fetched,
     category: r.category, categoryReason: r.category_reason, categoryModel: r.category_model,
-    categoryAt: r.category_at, aiAttempted: !!r.ai_attempted, worth: r.worth || 0, worthReason: r.worth_reason || '', done: r.done === 1, doneAt: r.done_at || 0, hidden: r.hidden === 1, dates: safeJson(r.dates_json, []), datesAt: r.dates_at || 0, aiSummary: r.ai_summary,
+    categoryAt: r.category_at, aiAttempted: !!r.ai_attempted, worth: r.worth || 0, worthReason: r.worth_reason || '', done: r.done === 1, doneAt: r.done_at || 0, hidden: r.hidden === 1, dates: safeJson(r.dates_json, []), datesAt: r.dates_at || 0, datesIgnored: r.dates_ignored === 1, aiSummary: r.ai_summary,
     aiSummaryModel: r.ai_summary_model, aiSummaryAt: r.ai_summary_at,
     labels: safeJson(r.labels, []), createdAt: r.created_at,
     accountName: r.account_name || '', accountColor: r.account_color || '',
@@ -369,20 +371,20 @@ export const MessageStore = {
       hasAttachments: 'has_attachments', attJson: 'att_json', attMeta: 'att_json', snippet: 'snippet',
       bodyText: 'body_text', bodyHtml: 'body_html', bodyFetched: 'body_fetched', headers: 'headers_json',
       category: 'category', categoryReason: 'category_reason', categoryModel: 'category_model',
-      categoryAt: 'category_at', aiAttempted: 'ai_attempted', worth: 'worth', worthReason: 'worth_reason', done: 'done', doneAt: 'done_at', hidden: 'hidden', dates: 'dates_json', datesAt: 'dates_at', aiSummary: 'ai_summary',
+      categoryAt: 'category_at', aiAttempted: 'ai_attempted', worth: 'worth', worthReason: 'worth_reason', done: 'done', doneAt: 'done_at', hidden: 'hidden', dates: 'dates_json', datesAt: 'dates_at', datesIgnored: 'dates_ignored', aiSummary: 'ai_summary',
       aiSummaryModel: 'ai_summary_model', aiSummaryAt: 'ai_summary_at', labels: 'labels',
     };
     const allowed = new Set(['subject', 'from_addr', 'from_name', 'to_list', 'cc_list', 'date_ms', 'received_ms',
       'size', 'flags', 'read', 'important', 'has_attachments', 'att_json', 'snippet', 'body_text', 'body_html',
       'body_fetched', 'headers_json', 'category', 'category_reason', 'category_model', 'category_at',
-      'ai_attempted', 'worth', 'worth_reason', 'done', 'done_at', 'hidden', 'dates_json', 'dates_at', 'ai_summary', 'ai_summary_model', 'ai_summary_at', 'labels']);
+      'ai_attempted', 'worth', 'worth_reason', 'done', 'done_at', 'hidden', 'dates_json', 'dates_at', 'dates_ignored', 'ai_summary', 'ai_summary_model', 'ai_summary_at', 'labels']);
     const sets = []; const vals = [];
     for (const [orig, v] of Object.entries(fields)) {
       const k = ALIAS[orig] || orig;
       if (!allowed.has(k)) continue;
       if (['to_list', 'cc_list', 'flags', 'att_json', 'labels', 'headers_json', 'dates_json'].includes(k)) {
         sets.push(`${k} = ?`); vals.push(toJson(v ?? []));
-      } else if (['read', 'important', 'has_attachments', 'body_fetched', 'done', 'hidden'].includes(k)) {
+      } else if (['read', 'important', 'has_attachments', 'body_fetched', 'done', 'hidden', 'dates_ignored'].includes(k)) {
         sets.push(`${k} = ?`); vals.push(v ? 1 : 0);
       } else { sets.push(`${k} = ?`); vals.push(v ?? null); }
     }
@@ -401,7 +403,7 @@ export const MessageStore = {
     return m;
   },
   /**
-   * 批量按 id 取正文（BUG-43）。只选正文列，供启动回填等场景一次取回，
+   * 批量按 id 取正文。只选正文列，供启动回填等场景一次取回，
    * 避免在循环里对每封邮件单独查库（N 次 SQL → 1 次）。
    * @param {Array<number|string>} ids
    * @returns {Map<number, {bodyText:string, bodyHtml:string}>}
@@ -529,7 +531,7 @@ export const MessageStore = {
 };
 
 /* ================= 附件 ================= */
-/** 统一的“是否杂项”表达式：用户手动改判优先，其次自动判定（BUG-33/40） */
+/** 统一的“是否杂项”表达式：用户手动改判优先，其次自动判定 */
 const JUNK_EXPR = 'COALESCE(a.junk_override, a.junk)';
 
 export const AttachmentStore = {
@@ -585,7 +587,7 @@ export const AttachmentStore = {
     const rows = q("SELECT DISTINCT stored FROM attachment WHERE stored != ''");
     return new Set(rows.map((r) => r.stored));
   },
-  /** 组合查询：过滤/排序/分页全部下推 SQL，total 与分组统计口径一致（BUG-33） */
+  /** 组合查询：过滤/排序/分页全部下推 SQL，total 与分组统计口径一致 */
   list(opts) {
     const where = ['1=1']; const params = [];
     if (opts.accountIds && opts.accountIds.length) {
@@ -604,8 +606,7 @@ export const AttachmentStore = {
     if (wantJunk) where.push(`${JUNK_EXPR} = 1`);
     else if (noJunkByDefault) where.push(`${JUNK_EXPR} = 0`);
 
-    // 性能优化（BUG-42）：把「MIME 大类」过滤下推到 SQL。
-    // 以前是全表 JOIN 取回后在内存里按 a.group 过滤 + 排序 + 切片，
+    // 性能优化：把「MIME 大类」过滤下推到 SQL。
     // 附件量大时（实测本机 300+ 条）要把所有行连同正文消息字段都读进 JS 再丢弃。
     // 现在按分组定义翻译成 mime 的 IN/LIKE 条件，交给 SQLite 用索引过滤。
     if (wantGroups.length) {
@@ -672,7 +673,7 @@ const MIME_GROUPS = MIME_GROUP;
 function mimeList(g) { return MIME_GROUPS[g] || []; }
 
 /**
- * 把「MIME 大类名」翻译成等价的 SQL 条件，使过滤能下推到 SQLite（BUG-42）。
+ * 把「MIME 大类名」翻译成等价的 SQL 条件，使过滤能下推到 SQLite。
  * 语义必须与 mimeGroup() 完全一致，否则附件库筛选会漏项：
  *   - 显式枚举的组（document/table/...）→ mime IN (...)
  *   - 以前缀兜底的组（image/text/audio/video）→ mime LIKE 'prefix/%'
@@ -750,7 +751,7 @@ export const RuleStore = {
     return r ? { id: r.id, name: r.name, enabled: !!r.enabled, priority: r.priority, match: safeJson(r.match_json, []), action: safeJson(r.action_json, {}) } : null;
   },
   save(rule) {
-    // BUG-02 修复：未显式传 enabled 时默认「启用」（此前会被存成停用，规则看似存在却不生效）
+    // 未显式传 enabled 时默认「启用」（此前会被存成停用，规则看似存在却不生效）
     const enabledFlag = rule.enabled === undefined || rule.enabled === null
       ? 1
       : (rule.enabled ? 1 : 0);

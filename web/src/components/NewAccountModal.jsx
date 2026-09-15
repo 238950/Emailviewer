@@ -19,7 +19,7 @@ export default function NewAccountModal() {
   const preset = presets?.hostPresets?.[form.preset] || {};
 
   /**
-   * BUG-11：表单里的端口 / SSL 始终以用户输入为准。
+   * 表单里的端口 / SSL 始终以用户输入为准。
    * 选择预设时把预设值写进表单（pickPreset），之后不再被预设覆盖。
    */
   const pickPreset = (idx) => {
@@ -70,7 +70,7 @@ export default function NewAccountModal() {
         toast(`已添加 IMAP 账户：${r.account.name}`, 'success');
       }
       setNewAccountOpen(false);
-      // BUG-13：POST /api/accounts 内部已完成首轮同步 + 正文预取，
+      // POST /api/accounts 内部已完成首轮同步 + 正文预取，
       // 这里不再重复 api.sync()（Outlook COM 首轮遍历很慢，重复会翻倍等待）。
       await refreshStatus(true);
       selectAccount(createdId);

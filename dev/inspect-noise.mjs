@@ -1,4 +1,4 @@
-// 检查日历事件 / 提醒 / 通知中心的遗留噪声（来自 BUG-19 旧版日期识别）
+// 检查日历事件 / 提醒 / 通知中心的遗留噪声（来自旧版日期识别）
 const b = `http://127.0.0.1:${process.argv[2] || 3869}`;
 const get = async (p) => (await fetch(b + p)).json();
 

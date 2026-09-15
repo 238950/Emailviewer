@@ -1,10 +1,15 @@
 # 依赖
 node_modules/
 
+# 环境变量：含真实 API Key，绝对不能提交
+.env
+.env.local
+.env.*.local
+
 # npm 本地缓存（仅供离线安装，非源码）
 .npm-cache/
 
-# 运行时数据（含真实邮件、附件缓存、加密密钥）——绝不提交
+# 运行时数据（含真实邮件、附件缓存、加密密钥）
 server/data/
 server/public/
 web/dist/

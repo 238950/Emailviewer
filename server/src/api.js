@@ -5,26 +5,27 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { AccountStore, FolderStore, MessageStore, AttachmentStore, RuleStore, EventStore, SettingsStore } from './store.js';
 import { getSettings, updateSettings, catLabel, HOST_PRESETS, DEFAULT_SETTINGS } from './settings.js';
-import { encrypt, decrypt } from './crypto.js';
+import { encrypt } from './crypto.js';
 import { syncAccount, setFlags, setFlagsBatch, testConnection } from './imap.js';
 import { hydrateByUid } from './hydrate.js';
-import { aiClassifyBatch, summarizeMessage, testProvider, activeProvider, chat } from './ai.js';
+import { aiClassifyBatch, summarizeMessage, testProvider, activeProvider, chat, resolveApiKey } from './ai.js';
 import { extractFromMessage } from './nlp.js';
-import { applyRules, applyRulesAndSave, applyRulesToHydrated } from './rules.js';
+import { applyRules, applyRulesToHydrated } from './rules.js';
 import { busy, runHydration, composeDigest, purgeAttachmentCache, pushNewMailNotice } from './services.js';
 import { logger, DATA_DIR, ATTACH_DIR, SAVED_DIR, LOG_FILE } from './logger.js';
 import { autoStartStatus, applyAutoStart } from './autostart.js';
-import { resolveInboxFolders, isInboxFolderName } from './mailboxes.js';
-import { uid, now, safeJson, mimeGroup, stripHtml } from './util.js';
+import { resolveInboxFolders } from './mailboxes.js';
+import { uid, now, mimeGroup, stripHtml } from './util.js';
+import { isKeyFromEnv } from './env.js';
 
 export const api = Router();
 api.use(expressJson());
 api.use(originGuard);
 
-const BODY_LIMIT = 2 * 1024 * 1024;   // BUG-17：请求体上限 2MB
+const BODY_LIMIT = 2 * 1024 * 1024;   // 请求体上限 2MB
 
 /**
- * BUG-16：本地写接口的来源校验。
+ * 本地写接口的来源校验。
  * 服务只监听 127.0.0.1，但仍可能被浏览器里的任意网页用跨站表单/请求改写本地数据（CSRF）。
  * 规则：① 写方法必须带 application/json；② 带 Origin/Referer 时必须指向本机服务端口。
  */
@@ -55,7 +56,7 @@ function originGuard(req, res, next) {
 
 function expressJson() {
   return (req, res, next) => {
-    // BUG-17：先看声明的 Content-Length，超限直接拒绝（连读取都不需要）
+    // 先看声明的 Content-Length，超限直接拒绝（连读取都不需要）
     const declared = Number(req.get('content-length') || 0);
     if (declared > BODY_LIMIT) {
       req.resume();   // 丢弃后续数据，保持连接可复用
@@ -94,7 +95,7 @@ const ok = (res, data, code = 200) => res.status(code).json({ ok: true, ...data 
 const fail = (res, msg, code = 400) => res.status(code).json({ ok: false, error: msg });
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
 const str = (v, d = '') => (v == null ? d : String(v));
-/** 整数夹取（BUG-35）：非数字/空/负数 → 回落默认值；过大的值夹取到上限 */
+/** 整数夹取：非数字/空/负数 → 回落默认值；过大的值夹取到上限 */
 const clampInt = (v, dflt, min, max) => {
   const n = Number(v);
   if (v == null || v === '' || !Number.isFinite(n) || n < 0) return dflt;
@@ -102,14 +103,14 @@ const clampInt = (v, dflt, min, max) => {
 };
 
 /**
- * BUG-44：async 路由包装器。
+ * async 路由包装器。
  * Express 4 不会自动捕获 async 处理函数 reject 的 Promise——一旦抛错就变成
  * unhandledRejection，Node 22 默认 --unhandled-rejections=throw 会直接终止进程。
  * 用 wrap() 把 rejection 显式转交给 next()，交给下方统一错误中间件处理。
  */
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-/* ---------- AI 在途请求去重（BUG-46） ---------- */
+/* ---------- AI 在途请求去重 ---------- */
 /**
  * 手动触发的 AI 接口（classify / summarize / ai-classify）原先无锁：
  * 连点、多标签页或网络重试会串行执行多次真实调用 → 重复计费。
@@ -134,7 +135,7 @@ export function aiInFlightSnapshot() {
   return [...aiInFlight.entries()].map(([k, at]) => ({ key: k, since: at, ms: Date.now() - at }));
 }
 
-/* ---------- 日期提取缓存（BUG-49） ---------- */
+/* ---------- 日期提取缓存 ---------- */
 /**
  * extractFromMessage() 是纯正则扫描，实测 60 封约 404ms，而 /home 每次请求都会
  * 对"尚未预存 dates 的邮件"重跑一遍（liveExtractBudget=60），且结果不缓存——
@@ -189,16 +190,23 @@ export function maskSecret(secret) {
   return `${s.slice(0, 4)}${stars}${s.slice(-4)}`;
 }
 
-/** 脱敏 AI 配置（不下发真实密钥，只给前4/后4） */
+/** 脱敏 AI 配置（不下发真实密钥，只给前4/后4）
+ *  hasKey 以「.env 优先、数据库兜底」解析后的结果为准；keySource 标明密钥来源：
+ *    env  = 由 .env 文件托管（界面输入框改不动，以文件为准）
+ *    db   = 存在数据库里（可在设置页修改）
+ *    none = 未配置
+ */
 function sanitizeAi(cfg) {
   const out = JSON.parse(JSON.stringify(cfg || {}));
   for (const k of Object.keys(out.providers || {})) {
     const p = out.providers[k];
-    if (p && p.apiKey) {
-      p.hasKey = true;
-      p.keyPreview = maskSecret(p.apiKey);
-      delete p.apiKey;
-    } else if (p) { p.hasKey = false; p.keyPreview = ''; }
+    if (!p) continue;
+    const { key, source } = resolveApiKey(k, p.apiKey);
+    p.hasKey = !!key;
+    p.keySource = source;
+    p.keyPreview = key ? maskSecret(key) : '';
+    p.envManaged = source === 'env';
+    delete p.apiKey;
   }
   return out;
 }
@@ -266,7 +274,7 @@ api.post('/accounts', async (req, res) => {
       id: accountId, kind: 'imap', name: name || email.split('@')[0], email, username: username || email,
       host, port: num(port, 993), ssl: ssl !== false, auth: auth || 'password',
       passwordEnc: encrypt(password), isPrimary: AccountStore.list().length === 0, color: color || '#4f8cff',
-      extra,   // BUG-11：把“允许不校验 TLS 证书”等选项真正落库
+      extra,   // 把“允许不校验 TLS 证书”等选项真正落库
     });
     // 校验并同步一次
     const summary = await syncAccount(accountId).catch((e) => {
@@ -344,14 +352,14 @@ api.put('/accounts/:id', (req, res) => {
 api.delete('/accounts/:id', (req, res) => {
   const a = AccountStore.get(req.params.id);
   if (!a) return fail(res, '账户不存在', 404);
-  // BUG-12：删除账户时一并清理派生日历事件与落盘的附件文件，并回报释放量
+  // 删除账户时一并清理派生日历事件与落盘的附件文件，并回报释放量
   const report = AccountStore.remove(a.id);
   logger.info('api', `已删除账户 ${a.name}：邮件 ${report.messages}、附件文件 ${report.files}、事件 ${report.events}`);
   ok(res, { removed: true, report });
 });
 
 api.post('/accounts/:id/primary', (req, res) => {
-  // BUG-24：账户不存在时必须 404，否则 makePrimary 会把所有账户的主标记清空
+  // 账户不存在时必须 404，否则 makePrimary 会把所有账户的主标记清空
   const a = AccountStore.get(req.params.id);
   if (!a) return fail(res, '账户不存在', 404);
   makePrimary(a.id);
@@ -404,7 +412,7 @@ api.get('/messages', (req, res) => {
   let folderIn = null;
   if (q.unified && folder === 'INBOX') {
     if (!accountIds.length) {
-      // BUG-18：未指定/未启用账户时直接返回空，而不是全库查询
+      // 未指定/未启用账户时直接返回空，而不是全库查询
       return ok(res, { total: 0, list: [], page: 0, pageSize: num(q.pageSize, PAGE_SIZE) });
     }
     const resolved = resolveInboxFolders(accountIds);
@@ -431,7 +439,7 @@ api.get('/messages', (req, res) => {
     dateTo: q.toDate ? num(q.toDate, null) : null,
     sort: q.sort ? str(q.sort) : 'date',
     dir: q.dir ? str(q.dir) : 'desc',
-    // BUG-35：非法/越界参数回落默认值并夹取上下限，而不是原样透传
+    // 非法/越界参数回落默认值并夹取上下限，而不是原样透传
     page: clampInt(q.page, 0, 0, 100000),
     pageSize: clampInt(q.pageSize, PAGE_SIZE, 1, 200),
   };
@@ -504,7 +512,7 @@ api.post('/messages/:id/label', (req, res) => {
 api.post('/messages/:id/classify', wrap(async (req, res) => {
   const m = MessageStore.detail(req.params.id);
   if (!m) return fail(res, '邮件不存在', 404);
-  // BUG-46：同一封邮件已有在途分类请求时直接拒绝，避免重复调用上游 AI（重复计费）
+  // 同一封邮件已有在途分类请求时直接拒绝，避免重复调用上游 AI（重复计费）
   if (!claimAi('classify', m.id)) return fail(res, '该邮件正在分类中，请稍候', 429);
   try {
     // 手动分类时重置 ai_attempted 以便重跑
@@ -519,7 +527,7 @@ api.post('/messages/:id/classify', wrap(async (req, res) => {
 api.post('/messages/:id/summarize', wrap(async (req, res) => {
   const m = MessageStore.detail(req.params.id);
   if (!m) return fail(res, '邮件不存在', 404);
-  // BUG-46：摘要同样加在途去重
+  // 摘要同样加在途去重
   if (!claimAi('summarize', m.id)) return fail(res, '该邮件正在生成摘要，请稍候', 429);
   try {
     const r = await summarizeMessage(m);
@@ -530,7 +538,7 @@ api.post('/messages/:id/summarize', wrap(async (req, res) => {
 }));
 
 /**
- * BUG-19：日期候选的可信度门槛。
+ * 日期候选的可信度门槛。
  * AI 识别的（source=ai）直接信任；规则识别的要求 confidence=high（截止/考试词紧邻日期）。
  * 老库中历史数据没有 confidence，按 medium 处理，只用于阅读窗格展示，不自动进首页/日历。
  */
@@ -543,6 +551,8 @@ function isTrustedDate(d) {
 api.get('/messages/:id/dates', (req, res) => {
   const m = MessageStore.detail(req.params.id);
   if (!m) return fail(res, '邮件不存在', 404);
+  // 用户主动忽略过 → 直接返回空，不再实时重提取
+  if (m.datesIgnored) return ok(res, { candidates: [], source: 'ignored' });
   // 优先返回已存（AI 识别/规则）的结果；没有则实时用规则提取
   let candidates = Array.isArray(m.dates) ? m.dates.map((d) => ({
     ms: d.ms, dateMs: d.ms, phrase: '', time: null, context: d.title || '', type: d.kind || 'event',
@@ -552,19 +562,24 @@ api.get('/messages/:id/dates', (req, res) => {
   ok(res, { candidates, source: Array.isArray(m.dates) && m.dates.length ? (m.dates[0].source || 'rule') : 'rule' });
 });
 
-/** 一键忽略某封邮件的识别结果（BUG-19：允许用户清掉误报，不再污染首页/日历） */
+/**
+ * 一键忽略/恢复某封邮件的识别结果（允许清掉误报；让忽略真正持久）。
+ * 关键：忽略必须落成独立标记，不能只写空数组——否则下次读取会被当成"尚未提取"而重新提取。
+ * body: { ignored: true } 忽略（默认）；{ ignored: false } 恢复识别
+ */
 api.post('/messages/:id/dates/clear', (req, res) => {
   const m = MessageStore.detail(req.params.id);
   if (!m) return fail(res, '邮件不存在', 404);
-  MessageStore.update(m.id, { dates: [], datesAt: Date.now() });
-  ok(res, { id: m.id, dates: [] });
+  const ignored = req.body?.ignored !== false;
+  MessageStore.update(m.id, { dates: [], datesAt: ignored ? Date.now() : 0, datesIgnored: ignored });
+  ok(res, { id: m.id, dates: [], ignored });
 });
 
 api.post('/messages/batch-action', async (req, res) => {
   const { ids, action, value } = req.body || {};
   const list = (ids || []).map(num).filter(Boolean);
   if (!list.length) return fail(res, '请选择邮件');
-  // BUG-34：把邮箱侧标记收集起来一次性提交，同一账户复用一条 IMAP 连接
+  // 把邮箱侧标记收集起来一次性提交，同一账户复用一条 IMAP 连接
   const flagJobs = [];
   for (const id of list) {
     const m = MessageStore.get(id);
@@ -586,7 +601,7 @@ api.post('/messages/batch-action', async (req, res) => {
         : (m.labels || []).filter((l) => l !== value);
       MessageStore.update(id, { labels });
     } else if (action === 'delete_local') {
-      // BUG-21 修复：真正的“从本地隐藏”（不再用一个中文标签冒充删除）
+      // 真正的“从本地隐藏”（不再用一个中文标签冒充删除）
       MessageStore.update(id, { hidden: true, read: true });
     } else if (action === 'unhide_local') {
       MessageStore.update(id, { hidden: false });
@@ -622,7 +637,7 @@ api.get('/home', (req, res) => {
   const q = req.query || {};
   const rawA = q.accountId ?? q.account_ids ?? q.accountIds;
   const wantIds = Array.isArray(rawA) ? rawA.filter(Boolean) : String(rawA || '').split(',').filter(Boolean);
-  // BUG-18：未启用任何账户 / 未解析到收件箱时返回空结果，避免退化成“全库查询”
+  // 未启用任何账户 / 未解析到收件箱时返回空结果，避免退化成“全库查询”
   const inbox = resolveInboxFolders(wantIds);
   if (!inbox.accountIds.length || !inbox.folders.length) {
     return ok(res, {
@@ -645,8 +660,7 @@ api.get('/home', (req, res) => {
   const nowMs = Date.now();
   const horizon = nowMs + 21 * 86400 * 1000;
 
-  // BUG-49：先挑出"没有预存 dates"的邮件，一次性批量取回正文，供缓存提取使用。
-  // 原先是在循环里对每封调用 MessageStore.detail()（60 次单条查询），现在改为 1 次批量。
+  // 先挑出"没有预存 dates"的邮件，一次性批量取回正文，供缓存提取使用。
   const needBodyIds = [];
   for (const m of all) {
     if (!Array.isArray(m.dates) || !m.dates.length) needBodyIds.push(m.id);
@@ -666,6 +680,8 @@ api.get('/home', (req, res) => {
   /** 取该邮件未来的时间点（优先使用已存的 AI/规则识别结果，其次走缓存的正则提取） */
   let liveExtractBudget = 60; // 首屏最多对 60 封做实时规则兜底，避免页面卡顿
   const futureDates = (m) => {
+    // 用户主动忽略过的邮件不参与「临近截止」
+    if (m.datesIgnored) return [];
     let list = Array.isArray(m.dates) ? m.dates : [];
     if (!list.length && liveExtractBudget > 0) {
       liveExtractBudget--;
@@ -686,7 +702,7 @@ api.get('/home', (req, res) => {
   const sorted = all.slice().sort((a, b) => ((b.worth || 0) - (a.worth || 0)) || (b.dateMs - a.dateMs));
   for (const m of sorted) {
     const worth = m.worth || 0;
-    // BUG-19：只有“高置信度”或 AI 识别出的时间才算临近截止，避免噪声污染首页
+    // 只有“高置信度”或 AI 识别出的时间才算临近截止，避免噪声污染首页
     const ds = futureDates(m).filter(isTrustedDate);
     const extra = ds[0]
       ? { deadlineMs: ds[0].ms, deadlineText: ds[0].title, deadlineType: ds[0].kind, deadlineConfidence: ds[0].confidence || (ds[0].source === 'ai' ? 'ai' : 'medium') }
@@ -717,12 +733,12 @@ api.get('/home', (req, res) => {
   });
 });
 
-/** 已处理归档：已标记“已处理”的重要邮件（BUG-20：done 仅本机归档，不改邮箱已读） */
+/** 已处理归档：已标记“已处理”的重要邮件（done 仅本机归档，不改邮箱已读） */
 api.get('/home/done', (req, res) => {
   const q = req.query || {};
   const rawA = q.accountId ?? q.account_ids ?? q.accountIds;
   const wantIds = Array.isArray(rawA) ? rawA.filter(Boolean) : String(rawA || '').split(',').filter(Boolean);
-  // BUG-18：无启用账户 → 空结果（不再全库查询）
+  // 无启用账户 → 空结果（不再全库查询）
   const inbox = resolveInboxFolders(wantIds);
   if (!inbox.accountIds.length) return ok(res, { total: 0, items: [], noAccounts: true });
   const r = MessageStore.query({
@@ -751,10 +767,8 @@ api.post('/messages/:id/done', (req, res) => {
 
 /* ================= 状态（轮询） ================= */
 api.get('/status', (req, res) => {
-  // BUG-50：原先在「每个文件夹」的循环里重复调用 unreadByFolder(a.id)，
   // 且在每个账户里重复调用 unreadByAccount()——N 个文件夹 = N 次相同的聚合查询。
   // /status 每 10 秒被轮询，账户/文件夹增长后是 O(账户 × 文件夹) 的重复开销。
-  // 现改为：每次聚合只取一次，转成 Map 后按名查找。
   const unreadByAcct = new Map(
     MessageStore.unreadByAccount().map((r) => [r.account_id, r.unread || 0]),
   );
@@ -773,7 +787,7 @@ api.get('/status', (req, res) => {
   const catUnread = {};
   for (const c of MessageStore.unreadByCategory()) catUnread[c.category] = c.unread;
   const upcoming = EventStore.upcoming(3);
-  // BUG-46：暴露在途 AI 请求，便于前端提示与验证脚本断言
+  // 暴露在途 AI 请求，便于前端提示与验证脚本断言
   ok(res, { accounts, catUnread, upcomingEvents: upcoming, serverTime: now(), aiInFlight: aiInFlightSnapshot() });
 });
 
@@ -792,7 +806,7 @@ api.get('/attachments', (req, res) => {
     pageSize: clampInt(q.pageSize, 48, 1, 200),
     dir: q.dir ? str(q.dir) : 'desc',
     sort: q.sort ? str(q.sort) : 'createdAt',
-    // BUG-40：可在设置里关掉“自动把杂项移出主列表”
+    // 可在设置里关掉“自动把杂项移出主列表”
     includeJunk: q.includeJunk === '1' || q.includeJunk === 'true' || s.junkHideAuto === false,
   };
   const result = AttachmentStore.list(opts);
@@ -806,7 +820,7 @@ api.get('/attachments/groups', (req, res) => {
   ok(res, { groups: st.groups, junk: st.junk, clean: st.clean, total: st.total, accountIds });
 });
 
-/** BUG-40：逐条改判“杂项”（junk=false 表示这条其实不是杂项；junk=null 恢复自动判定） */
+/** 逐条改判“杂项”（junk=false 表示这条其实不是杂项；junk=null 恢复自动判定） */
 api.post('/attachments/:id/junk', (req, res) => {
   const att = AttachmentStore.get(req.params.id);
   if (!att) return fail(res, '附件不存在', 404);
@@ -848,8 +862,7 @@ api.post('/attachments/:id/save', (req, res) => {
   const s = getSettings();
   const requested = (req.body && req.body.dir) || s.attachmentSaveDir || SAVED_DIR;
 
-  // BUG-45：保存目录必须落在白名单前缀内。
-  // 原先直接采用请求体里的 dir，safeLocalName() 只清洗文件名、对目录毫无约束，
+  // 保存目录必须落在白名单前缀内。
   // 任何同源页面都能借该接口把文件写到任意可写路径（实测曾成功写入 C:\Windows\Temp）。
   // 修法：resolve 成绝对路径后再做前缀比较（必须先 resolve，否则 ../ 可绕过字符串比较）。
   const allowed = saveDirWhitelist(s);
@@ -861,26 +874,51 @@ api.post('/attachments/:id/save', (req, res) => {
 
   try {
     fs.mkdirSync(resolvedDir, { recursive: true });
-    const dest = path.join(resolvedDir, safeLocalName(att.filename || `attachment-${att.id}`));
-    fs.copyFileSync(src, dest);
+    const baseName = safeLocalName(att.filename || `attachment-${att.id}`);
+    //（含用户自己编辑过的版本），属不可逆数据丢失。改为自动编号保存。
+    let dest = uniqueSavePath(resolvedDir, baseName);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        // COPYFILE_EXCL：目标已存在则报错，避免 existsSync 与写入之间的竞态
+        fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL);
+        break;
+      } catch (e) {
+        if (e.code !== 'EEXIST' || attempt >= 50) throw e;
+        dest = uniqueSavePath(resolvedDir, baseName);
+      }
+    }
     // 仅在目录通过白名单校验后才打开资源管理器，避免"打开任意目录"被滥用
     if (s.autoOpenFolderAfterSave) {
       try { execFile('explorer.exe', [resolvedDir]); } catch { /* 忽略 */ }
     }
-    ok(res, { savedTo: dest });
+    ok(res, { savedTo: dest, renamed: path.basename(dest) !== baseName });
   } catch (e) {
     fail(res, `保存失败：${e.message}`, 500);
   }
 });
 
-/** BUG-45：附件保存的可写根目录白名单（去重 + 解析为绝对路径） */
+/**
+ * 在目标目录里为同名附件找一个不冲突的文件名（`名称 (1).ext`、`名称 (2).ext`…）。
+ * 只做"建议路径"，真正的排他写入由调用方的 COPYFILE_EXCL 保证。
+ */
+function uniqueSavePath(dir, name) {
+  const ext = path.extname(name);
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  for (let i = 0; i < 1000; i++) {
+    const candidate = path.join(dir, i === 0 ? name : `${stem} (${i})${ext}`);
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(dir, `${stem}-${Date.now()}${ext}`);
+}
+
+/** 附件保存的可写根目录白名单（去重 + 解析为绝对路径） */
 function saveDirWhitelist(s) {
   const roots = [s.attachmentSaveDir, SAVED_DIR, ATTACH_DIR].filter(Boolean).map((d) => path.resolve(String(d)));
   return [...new Set(roots)];
 }
 
 /**
- * BUG-45：把候选目录解析为绝对路径并校验落在白名单内。
+ * 把候选目录解析为绝对路径并校验落在白名单内。
  * 通过返回 resolve 后的绝对路径，不通过返回 null。
  * 用 path.relative 判断包含关系（比字符串 startsWith 更可靠，能正确处理
  * 大小写差异、路径分隔符差异，以及 "C:\data" vs "C:\database" 这类前缀误判）。
@@ -905,7 +943,7 @@ api.get('/events', (req, res) => {
   const end = num(req.query.end, now() + 3 * 30 * 86400000);
   ok(res, { events: EventStore.list(start, end) });
 });
-/** 事件时间规范化（BUG-26）：先 coerce 再校验，非法值报错而不是落库成 1970/负数 */
+/** 事件时间规范化：先 coerce 再校验，非法值报错而不是落库成 1970/负数 */
 function normalizeEventTimes(b, base = {}) {
   const rawStart = b.startMs ?? base.startMs;
   const startMs = Number(rawStart);
@@ -947,7 +985,7 @@ api.put('/events/:id', (req, res) => {
   ok(res, { event: EventStore.get(ev.id) });
 });
 api.delete('/events/:id', (req, res) => {
-  // BUG-25：与 /accounts、/messages 保持一致，删除不存在的事件返回 404
+  // 与 /accounts、/messages 保持一致，删除不存在的事件返回 404
   const ev = EventStore.get(req.params.id);
   if (!ev) return fail(res, '事件不存在', 404);
   EventStore.remove(ev.id);
@@ -961,7 +999,7 @@ api.post('/calendar/auto-from-mail', (req, res) => {
   const limit = Math.min(Math.max(num(b.limit, 30), 1), 80);
   const rawA = b.accountId ?? b.accountIds;
   const wantIds = Array.isArray(rawA) ? rawA.filter(Boolean) : String(rawA || '').split(',').filter(Boolean);
-  // BUG-18：无启用账户 → 不安排任何事件
+  // 无启用账户 → 不安排任何事件
   const inbox = resolveInboxFolders(wantIds);
   if (!inbox.accountIds.length) return ok(res, { created: 0, skipped: 0, candidates: 0, events: [], noAccounts: true });
   const nowMs = Date.now();
@@ -980,15 +1018,17 @@ api.post('/calendar/auto-from-mail', (req, res) => {
     if (m.done) continue;
     if (['promo', 'spam'].includes(m.category)) continue;
     if (!((m.worth || 0) >= 2 || !m.read)) continue;
+    // 用户主动忽略过的邮件不再被自动排入日历
+    if (m.datesIgnored) continue;
     let list = Array.isArray(m.dates) ? m.dates : [];
     if (!list.length) {
-      // BUG-49 续：复用日期提取缓存。这里一次可扫 500 封，原先逐封 detail()+正则
+      // 复用日期提取缓存。这里一次可扫 500 封，原先逐封 detail()+正则
       // 是无缓存的重活；走缓存后与 /home 共享结果，二次触发近乎零成本。
       list = extractDatesCached(m, null);
     }
     const picked = list
       .filter((d) => d && d.ms && d.ms > nowMs - 3600000 && d.ms <= horizon)
-      // BUG-19：只安排高置信度（AI 识别或“截止/考试词紧邻日期”）的时间，避免日历被噪声塞满
+      // 只安排高置信度（AI 识别或“截止/考试词紧邻日期”）的时间，避免日历被噪声塞满
       .filter(isTrustedDate)
       .sort((x, y) => x.ms - y.ms)
       .slice(0, 2); // 每封最多 2 个时间，避免刷屏
@@ -1076,6 +1116,7 @@ api.put('/ai/config', (req, res) => {
   const patch = req.body || {};
   const cur = getSettings().ai || {};
   const next = JSON.parse(JSON.stringify(cur));
+  const notices = [];
   if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled;
   if (patch.active) next.active = patch.active;
   if (typeof patch.autoClassify === 'boolean') next.autoClassify = patch.autoClassify;
@@ -1105,6 +1146,16 @@ api.put('/ai/config', (req, res) => {
       if (!np.label) np.label = k;
       if (!np.baseUrl) np.baseUrl = '';
       if (!np.model) np.model = '';
+      // 密钥已由 .env 托管时，不把明文写回数据库（.env 优先级更高，写库只会造成两处不一致）
+      if (isKeyFromEnv(k)) {
+        if (String(np.apiKey || '').trim()) {
+          notices.push(`服务商「${k}」的密钥由 .env 提供，本次输入未保存到数据库；如需更换请修改 server/.env 后重启。`);
+        }
+        np.apiKey = '';
+      } else {
+        // 顺手把 " " 这类纯空白归一为空，避免被判定成「已配置」
+        np.apiKey = String(np.apiKey == null ? '' : np.apiKey).trim();
+      }
       next.providers[k] = np;
     }
   }
@@ -1112,7 +1163,7 @@ api.put('/ai/config', (req, res) => {
   if (!next.providers[next.active]) next.active = Object.keys(next.providers)[0] || '';
   if (!Object.keys(next.providers).length) next.enabled = false;
   updateSettings({ ai: next });
-  ok(res, { ai: sanitizeAi(next) });
+  ok(res, { ai: sanitizeAi(next), notices });
 });
 api.post('/ai/test', async (req, res) => {
   try {
@@ -1133,7 +1184,8 @@ api.post('/ai/models', async (req, res) => {
     let apiKey = str(b.apiKey);
     if ((!baseUrl || !apiKey) && b.provider) {
       const p = (s.ai?.providers || {})[b.provider];
-      if (p) { baseUrl = baseUrl || p.baseUrl; apiKey = apiKey || p.apiKey; }
+      // 密钥同样走 .env 优先、数据库兜底的解析
+      if (p) { baseUrl = baseUrl || p.baseUrl; apiKey = apiKey || resolveApiKey(b.provider, p.apiKey).key; }
     }
     if (!baseUrl) return fail(res, '缺少 Base URL');
     const url = `${String(baseUrl).replace(/\/+$/, '')}/models`;
@@ -1230,7 +1282,7 @@ ${ctx || '（当前没有可用邮件）'}`;
 });
 api.post('/ai/classify', wrap(async (req, res) => {
   const accountId = req.body?.accountId;
-  // BUG-46：整批分类加全局在途锁——批处理耗时长，重复触发的代价最高
+  // 整批分类加全局在途锁——批处理耗时长，重复触发的代价最高
   if (!claimAi('ai-classify', accountId || '*')) return fail(res, '批量分类正在进行中，请稍候', 429);
   try {
     const accounts = accountId ? [accountId] : AccountStore.list().filter((a) => a.enabled).map((a) => a.id);
@@ -1257,7 +1309,7 @@ api.get('/ai/status', (req, res) => {
 });
 
 /* ================= 设置 ================= */
-/** BUG-27：可写的标量设置白名单 + 类型/范围校验，避免 "abc" 之类垃圾值落库后静默关掉功能 */
+/** 可写的标量设置白名单 + 类型/范围校验，避免 "abc" 之类垃圾值落库后静默关掉功能 */
 const SETTINGS_SPEC = {
   port: { type: 'int', min: 1024, max: 65535 },
   syncIntervalMin: { type: 'int', min: 0, max: 1440 },
@@ -1269,8 +1321,8 @@ const SETTINGS_SPEC = {
   attachmentSortDir: { type: 'enum', values: ['asc', 'desc'] },
   autoStart: { type: 'bool' },
   newMailNotify: { type: 'bool' },
-  markReadOnOpen: { type: 'bool' },          // BUG-23：打开邮件是否自动标记已读
-  junkHideAuto: { type: 'bool' },            // BUG-40：是否自动把“杂项附件”移出主列表
+  markReadOnOpen: { type: 'bool' },          // 打开邮件是否自动标记已读
+  junkHideAuto: { type: 'bool' },            // 是否自动把“杂项附件”移出主列表
   theme: { type: 'enum', values: ['light', 'dark', 'system'] },
   attachmentSaveDir: { type: 'string', maxLen: 512 },
   autoOpenFolderAfterSave: { type: 'bool' },
@@ -1452,7 +1504,7 @@ api.post('/storage/purge-cache', (req, res) => {
 });
 api.get('/logs', (req, res) => {
   try {
-    // BUG-47：改用 clampInt——原先的 num() 不夹取，tail=999999999 会把整个日志文件读进内存返回
+    // 改用 clampInt——原先的 num() 不夹取，tail=999999999 会把整个日志文件读进内存返回
     const n = clampInt(req.query.tail, 120, 1, 2000);
     const content = fs.readFileSync(LOG_FILE, 'utf8').split('\n').slice(-n).join('\n');
     ok(res, { logs: content });
@@ -1464,13 +1516,13 @@ api.get('/system', (req, res) => {
   ok(res, { version: '0.1.0', dataDir: DATA_DIR, uptime: process.uptime(), pid: process.pid });
 });
 
-/* BUG-32：未知 /api 路由统一返回 JSON 404（而不是 Express 的 HTML "Cannot GET /api/xxx"） */
+/* 未知 /api 路由统一返回 JSON 404（而不是 Express 的 HTML "Cannot GET /api/xxx"） */
 api.use((req, res) => {
   fail(res, `接口不存在：${req.method} /api${req.path === '/' ? '' : req.path}`, 404);
 });
 
 /**
- * BUG-44：统一错误中间件（必须四个参数，且必须放在所有路由与 404 兜底之后）。
+ * 统一错误中间件（必须四个参数，且必须放在所有路由与 404 兜底之后）。
  * 作用是兜住 wrap() 转交过来的 async rejection，以及同步路由里被 next(err) 抛出的异常。
  * 若没有它，这些错误会冒泡到 Express 默认处理器：开发环境返回 HTML 堆栈、生产环境静默 500，
  * 且日志里看不到任何线索。这里统一：写日志（含堆栈与请求上下文）→ 返回结构化 JSON。

@@ -74,8 +74,10 @@ export default function AttachmentsView() {
     } catch (e) { toast(e.message, 'error'); }
   };
 
-  /** BUG-38：不再用 window.open('_blank') 留下空白标签页，改为直接触发下载。
-   *  返回 true/false 以便批量下载统计失败数（单条下载仍会 toast 具体错误）。 */
+  /**
+   * 不再用 window.open('_blank') 留下空白标签页，改为直接触发下载。
+   *  返回 true/false 以便批量下载统计失败数（单条下载仍会 toast 具体错误）。
+   */
   const download = async (att, silent = false) => {
     try { await downloadAttachment(att.id, att.filename); return true; }
     catch (e) { if (!silent) toast(e.message, 'error'); return false; }
@@ -110,7 +112,7 @@ export default function AttachmentsView() {
 
   const cancelDownloadAll = () => { cancelDlRef.current = true; };
 
-  /** BUG-40：手动把某条附件移出/移入“杂项”，或恢复自动判定 */
+  /** 手动把某条附件移出/移入“杂项”，或恢复自动判定 */
   const setJunk = async (att, junk) => {
     try {
       await api.post(`/api/attachments/${att.id}/junk`, { junk });

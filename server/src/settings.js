@@ -14,9 +14,9 @@ export const DEFAULT_SETTINGS = {
   hydrateNewLimit: 60,
   // 附件缓存容量上限 MB
   attachmentCapMB: 400,
-  // 自动把“杂项附件”（logo/签名图/免责声明等）移出附件主列表（BUG-40，可在设置 → 外观 关闭）
+  // 自动把“杂项附件”（logo/签名图/免责声明等）移出附件主列表（可在设置 → 外观 关闭）
   junkHideAuto: true,
-  // 打开邮件时是否自动标记已读（会同步回邮箱服务器；BUG-23，可在设置 → 外观 关闭）
+  // 打开邮件时是否自动标记已读（会同步回邮箱服务器，可在设置 → 外观 关闭）
   markReadOnOpen: true,
   // 附件库排序：createdAt（时间，默认）| size（大小）
   attachmentSort: 'createdAt',

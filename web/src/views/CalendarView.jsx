@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, Plus, CalendarPlus, Download, Trash2, Clock, FileText, Sparkles } from 'lucide-react';
 import { useStore } from '../store.js';
 import { api, fmtDate, dayLabel } from '../api.js';
-import { Spinner, Modal, IconBtn, Empty } from '../components/common.jsx';
+import { Spinner, Modal, IconBtn, Empty, ConfirmDialog } from '../components/common.jsx';
 
 const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
 const MONTHS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
@@ -16,9 +16,9 @@ export default function CalendarView() {
   const [newOpen, setNewOpen] = useState(false);
   const [sel, setSel] = useState(null); // 选中事件查看
   const [autoBusy, setAutoBusy] = useState(false);
+  const [ask, setAsk] = useState(null);   // 待确认的危险操作（删除日程）
 
-  // BUG-54：range 的 useMemo 必须声明在 autoFromMail 之前。
-  // 原先 autoFromMail（其函数体在第 25 行引用 range）定义在 range 之前——
+  // range 的 useMemo 必须声明在 autoFromMail 之前。
   // 虽然事件触发时 range 已初始化、不会真的报错，但这属于 TDZ 易碎写法：
   // 若将来有人在渲染期间调用它（或在 effect 里提前引用），会直接崩溃。
   // 把声明顺序理顺，消除隐患。
@@ -50,7 +50,7 @@ export default function CalendarView() {
       .finally(() => setLoading(false));
   }, [range]);
 
-  // 计算格子（BUG-38：末尾补齐空位，最后一行也完整）
+  // 计算格子（末尾补齐空位，最后一行也完整）
   const cells = useMemo(() => {
     const first = new Date(ym.y, ym.m, 1);
     const lead = first.getDay(); // 前面补位
@@ -75,7 +75,20 @@ export default function CalendarView() {
     try { await api.del(`/api/events/${id}`); setEvents((l) => l.filter((x) => x.id !== id)); setSel(null); toast('事件已删除', 'success'); } catch (e) { toast(e.message, 'error'); }
   };
 
-  /** BUG-28：按 RFC 5545 生成 .ics（含 DTSTAMP、转义、75 字节折行、全天事件用 VALUE=DATE） */
+  /**
+   * 删除日程前先确认。
+   * 事件及其提醒一并消失且无法撤销；而设置页删除账户等危险操作是有确认弹窗的，
+   * 同一产品里两套标准不一致。这里统一走已有的 ConfirmDialog。
+   */
+  const askRemove = (ev) => setAsk({
+    title: '删除日程',
+    body: `确定删除日程「${ev.title}」吗？\n${fmtDate(ev.startMs, { full: true })}\n对应的提醒会一并删除，且无法撤销。`,
+    danger: true,
+    confirmText: '删除',
+    onOk: () => remove(ev.id),
+  });
+
+  /** 按 RFC 5545 生成 .ics（含 DTSTAMP、转义、75 字节折行、全天事件用 VALUE=DATE） */
   const buildIcs = (ev) => {
     const pad = (n) => String(n).padStart(2, '0');
     const utcStamp = (ms) => {
@@ -188,7 +201,7 @@ export default function CalendarView() {
             </div>
             <div className="upc-actions">
               <IconBtn title="导出 .ics 到其它日历" onClick={() => exportIcs(ev)}><Download size={13} /></IconBtn>
-              <IconBtn danger title="删除" onClick={() => remove(ev.id)}><Trash2 size={13} /></IconBtn>
+              <IconBtn danger title="删除" onClick={() => askRemove(ev)}><Trash2 size={13} /></IconBtn>
             </div>
           </div>
         ))}
@@ -196,7 +209,8 @@ export default function CalendarView() {
       </div>
 
       {newOpen && <EventForm onClose={() => setNewOpen(false)} onCreated={(ev) => { setEvents((l) => [...l, ev]); setNewOpen(false); toast('事件已创建', 'success'); }} />}
-      {sel && <EventDetail ev={sel} onClose={() => setSel(null)} onDelete={() => remove(sel.id)} onExport={() => exportIcs(sel)} />}
+      {sel && <EventDetail ev={sel} onClose={() => setSel(null)} onDelete={() => askRemove(sel)} onExport={() => exportIcs(sel)} />}
+      <ConfirmDialog req={ask} onClose={() => setAsk(null)} />
     </div>
   );
 }
